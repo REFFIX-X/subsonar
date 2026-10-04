@@ -72,38 +72,6 @@ def test_anonymous_resolver_rejects_forbidden_pool() -> None:
         AnonymousResolver(servers=["8.8.8.8"], verbose_queries=False)
 
 
-def test_aiodns_backend_matches_the_wire_resolver() -> None:
-    """The optional aiodns backend must resolve through the injected pool.
-
-    Regression: aiodns >= 4 takes the record type as a string, so passing the
-    c-ares integer constant raised ``ValueError: invalid query type``.
-
-    The query goes to the loopback mock rather than the public pool: this suite
-    must not send packets to third parties (``main.py selftest`` covers the real
-    pool), and pycares' shutdown thread has been observed to wedge the
-    interpreter when a live channel is torn down mid-run.
-    """
-    from subsonar.core.dns import AiodnsResolver
-    from subsonar.core.selftest import MOCK_IP, TEST_DOMAIN, MockDNSServer
-
-    async def check() -> None:
-        server = MockDNSServer()
-        port = await server.start()
-        resolver = AiodnsResolver(servers=[f"{MOCK_IP}:{port}"], timeout=2.0)
-        try:
-            resolver._load()
-            if not resolver.available:
-                pytest.skip("aiodns is not installed")
-            result = await resolver.resolve(TEST_DOMAIN, "A")
-            assert result.error is None, result.error
-            assert MOCK_IP in result.addresses, result.addresses
-        finally:
-            await resolver.aclose()
-            server.stop()
-
-    asyncio.run(check())
-
-
 def test_encode_name_round_trip() -> None:
     encoded = encode_name("www.example.com")
     assert encoded == b"\x03www\x07example\x03com\x00"

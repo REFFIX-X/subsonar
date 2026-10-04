@@ -2181,10 +2181,6 @@ class ScanEngine:
             if asyncio.iscoroutine(maybe):
                 await maybe
 
-    async def _scan_host(self, resolved: DNSResult) -> None:
-        """Compatibility shim — sweeps a single host."""
-        await self._sweep_batch([resolved], list(self.config.ports.keys()))
-
     def _make_finding(
         self,
         probe: WebProbeResult,

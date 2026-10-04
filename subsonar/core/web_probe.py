@@ -19,7 +19,7 @@ import socket
 import ssl
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 from urllib.parse import urljoin, urlsplit
 
 try:  # pragma: no cover - exercised indirectly
@@ -252,17 +252,6 @@ class WebProbe:
         await self.close()
 
     # -- probing ----------------------------------------------------------- #
-    async def probe_host(
-        self,
-        host: str,
-        ip: str,
-        ports: Iterable[int],
-        *,
-        deadline_hit: Any = None,
-    ) -> list[WebProbeResult]:
-        """Verify every open port of *host*; only web responders are returned."""
-        return await self.probe_multi(host, ip, ports)
-
     async def probe_multi(
         self, host: str, ip: str, ports: Sequence[int]
     ) -> list[WebProbeResult]:
@@ -642,13 +631,15 @@ class WebProbe:
                     ssl=False if not self.verify_tls else None,
                     timeout=request_timeout,
                 ) as response:
-                    body = b""
+                    chunks: list[bytes] = []
+                    total = 0
                     async for chunk in response.content.iter_chunked(_READ_CHUNK):
-                        body += chunk
-                        if len(body) >= max_bytes:
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if total >= max_bytes:
                             break
                     return (
-                        body[:max_bytes],
+                        b"".join(chunks)[:max_bytes],
                         response.headers.get("Content-Type"),
                         response.status,
                     )
@@ -881,11 +872,3 @@ def classify_finding(result: WebProbeResult) -> str:
     if status >= 400:
         return "misconfigured"
     return "interface"
-
-
-async def quick_fingerprint(
-    probe: WebProbe, host: str, ip: str, port: int
-) -> str | None:
-    """Probe used by wildcard detection — returns only the fingerprint."""
-    result = await probe.probe(host, ip, port)
-    return result.fingerprint if result.ok else None

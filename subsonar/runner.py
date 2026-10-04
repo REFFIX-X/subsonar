@@ -125,52 +125,5 @@ class ScanRunner:
         if self._thread is not None:
             self._thread.join(timeout)
 
-    def find(self, query: str) -> list[Finding]:
-        if not self.result:
-            return []
-        query = query.lower().strip()
-        if not query:
-            return list(self.result.findings)
-        return [
-            finding
-            for finding in self.result.findings
-            if query in finding.subdomain.lower()
-            or query in finding.url.lower()
-            or query in (finding.title or "").lower()
-            or query in finding.ip
-            or query == str(finding.port)
-        ]
-
     def snapshot(self) -> dict[str, Any]:
         return self.bus.snapshot()
-
-
-async def run_scan_async(
-    config: ScanConfig,
-    *,
-    profile: Profile | int | str | None = None,
-    bus: EventBus | None = None,
-    on_finding: Callable[[Finding], Any] | None = None,
-) -> ScanResult:
-    """Run the engine in the current event loop (headless / embedding)."""
-    engine = ScanEngine(config, profile=profile, bus=bus, on_finding=on_finding)
-    return await engine.run()
-
-
-def run_scan(
-    config: ScanConfig,
-    *,
-    profile: Profile | int | str | None = None,
-    bus: EventBus | None = None,
-    on_finding: Callable[[Finding], Any] | None = None,
-) -> ScanResult:
-    """Synchronous one-shot scan (``asyncio.run`` wrapper)."""
-    return asyncio.run(
-        run_scan_async(config, profile=profile, bus=bus, on_finding=on_finding)
-    )
-
-
-def plan_lines(config: ScanConfig, profile: Profile | int | str | None) -> list[str]:
-    prof = profile if isinstance(profile, Profile) else get_profile(profile or config.profile_id)
-    engine = ScanEngine(config, profile=prof)
-    return engine.describe_plan()
