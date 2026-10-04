@@ -1,0 +1,36 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Runtime caches and generated artifacts
+.subsonar_cache/
+output/
+.pytest_cache/
+pytest-cache-files-*/
+.tmp/
+tmp*/
+pip-build-tracker-*/
+pip-ephem-wheel-cache-*/
+pip-install-*/
+pip-metadata-*/
+pip-unpack-*/
+
+# Streamlit (keep .streamlit/config.toml, ignore secrets/credentials)
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

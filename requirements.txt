@@ -1,0 +1,20 @@
+# subsonar — runtime requirements
+#
+#   python -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# --- core async engine -------------------------------------------------------
+aiohttp>=3.9,<4          # async HTTP/HTTPS verification + OSINT + wordlist streaming
+aiodns>=3.2              # optional fast resolver backend (wire resolver is primary)
+dnspython>=2.6           # DNS record utilities / cross-checks
+pycares>=4.4             # pycares backend used by aiodns
+
+# --- interfaces --------------------------------------------------------------
+textual>=0.80            # Monokai Pro Dark TUI with the live scanning console
+rich>=13.7               # console renderer + tracebacks
+streamlit>=1.37          # optional local web dashboard (fragments + run_every for the live log)
+pandas>=2.0              # required by st.dataframe for the findings table
+
+# --- development -------------------------------------------------------------
+# pytest>=8.0
+# pytest-asyncio>=0.23
