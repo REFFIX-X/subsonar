@@ -148,7 +148,13 @@ def test_scanner_reset_stats() -> None:
 def test_dns_connection_id_bookkeeping() -> None:
     connection = DNSConnection("127.0.0.1:53")
     assert connection.in_flight == 0
-    assert len(connection._free_ids) == 0xFFFE  # 1..65534
+    # Only the handful of *in-flight* ids are tracked; the old preallocated
+    # 65 533-id set per socket is gone.
+    assert connection._inflight == set()
+    connection._inflight.add(1234)
+    assert 1234 in connection._inflight
+    connection._inflight.discard(1234)
+    assert connection._inflight == set()
     connection.close()
 
 

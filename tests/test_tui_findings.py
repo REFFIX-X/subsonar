@@ -50,6 +50,11 @@ def _synthetic_runner():
             ]
             self.result.finished_at = time.time()
 
+        @property
+        def live_result(self):
+            # Mirrors ScanRunner.live_result, which the TUI reads during a scan.
+            return self.result
+
     return _Runner()
 
 

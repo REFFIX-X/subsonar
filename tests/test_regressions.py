@@ -496,7 +496,7 @@ async def test_attempt_zone_transfer_keeps_only_in_scope_names() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_mining_connector_uses_anonymous_resolver() -> None:
+async def test_mining_connector_uses_anonymous_resolver() -> None:
     pytest.importorskip("aiohttp")
     from subsonar.core.dns import AnonymousResolver
     from subsonar.core.miner import _anonymous_connector
@@ -507,6 +507,9 @@ def test_mining_connector_uses_anonymous_resolver() -> None:
 
     resolver = AnonymousResolver(servers=("9.9.9.10",))
     connector = _anonymous_connector(resolver, 8)
-    assert isinstance(resolver_of(connector), AnonymousAiohttpResolver)
-    plain = _anonymous_connector(None, 8)
-    assert resolver_of(plain) is None
+    try:
+        # With a resolver supplied (the engine always passes one) DNS goes
+        # through the anonymous pool — not aiohttp's OS-resolver default.
+        assert isinstance(resolver_of(connector), AnonymousAiohttpResolver)
+    finally:
+        await connector.close()

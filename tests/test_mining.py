@@ -285,7 +285,7 @@ async def test_mining_phase_collects_header_and_file_hosts(monkeypatch) -> None:
         _finding_with_headers(**{"report-uri": "https://csp.example.com/r"})
     )
 
-    async def fake_fetch(targets, domain, *, bus=None, concurrency=6, timeout=6.0):
+    async def fake_fetch(targets, domain, *, bus=None, concurrency=6, timeout=6.0, resolver=None):
         assert targets and domain == "example.com"
         return ["fromfile.example.com"]
 
