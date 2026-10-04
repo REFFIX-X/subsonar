@@ -997,8 +997,8 @@ class AnonymousResolver:
                     if rcode != 0:
                         raise DNSError(f"resolver returned rcode={rcode}")
                     self._apply_records(result, records, qtype)
-                    if result.addresses or result.cnames:
-                        # A working answer clears any error left behind by an
+                    if result.records:
+                        # Any answer record clears an error left behind by an
                         # earlier node that timed out or refused: trying the next
                         # resolver is failover, not failure.  Leaving the stale
                         # error set made ``result.ok`` False for a host that had
@@ -1006,17 +1006,20 @@ class AnonymousResolver:
                         # unresolved and never cached it.
                         result.error = None
                         result.noerror_empty = False
-                    if not result.addresses and not result.cnames:
-                        # rcode 0 with an empty answer section: the zone answered
-                        # authoritatively and the name simply has no address.
-                        # Recorded explicitly so the engine can report it
-                        # distinctly from NXDOMAIN and from a transport failure.
+                    if not result.records:
+                        # rcode 0 with no answer records for the query: the zone
+                        # answered authoritatively and the name has nothing of
+                        # this type.  Deliberately keyed on "no *records*", not
+                        # "no *addresses*": an NS/MX/TXT answer legitimately has
+                        # records but no A address, and treating those as empty
+                        # poisoned the negative disk cache — blanking DNS-intel
+                        # and AXFR on every re-run.
                         result.noerror_empty = True
                         result.error = "NOERROR/empty"
                         if log and self.verbose_queries:
                             self.bus.dns(
                                 f"NOERROR/empty from [{node}] for ://{name} — "
-                                f"the name exists but has no A record",
+                                f"no {TYPE_NAMES.get(qtype, qtype)} record",
                                 host=name,
                                 ip=node,
                             )

@@ -99,6 +99,53 @@ async def test_dns_connection_tracks_inflight_without_preallocation() -> None:
     conn.close()
 
 
+def _ns_response(qid: int, zone: str, nameservers: list[str]) -> bytes:
+    from subsonar.core.dns import encode_name
+
+    def rr(name: str, rtype: int, rdata: bytes) -> bytes:
+        return encode_name(name) + struct.pack("!HHIH", rtype, 1, 60, len(rdata)) + rdata
+
+    question = encode_name(zone) + struct.pack("!HH", TYPE_NS, 1)
+    answers = b"".join(rr(zone, TYPE_NS, encode_name(ns)) for ns in nameservers)
+    header = struct.pack("!HHHHHH", qid, 0x8400, 1, len(nameservers), 0, 0)
+    return header + question + answers
+
+
+async def test_non_address_records_are_not_marked_empty_or_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An NS/MX answer has records but no A address — it must not be "empty".
+
+    Treating it as empty poisoned the negative disk cache, so every repeat scan
+    silently lost DNS-intel (MX/NS/TXT) and AXFR found no nameservers.
+    """
+    from subsonar.core.dns import AnonymousResolver
+    from subsonar.core.dnscache import DNSCache
+
+    cache = DNSCache(tmp_path / "dns.sqlite3")
+    resolver = AnonymousResolver(servers=("9.9.9.10",), disk_cache=cache)
+    lookup_id = {"n": 0}
+
+    async def fake_exchange(packet: bytes, server: str, qid: int, **kwargs: Any) -> bytes:
+        lookup_id["n"] += 1
+        return _ns_response(qid, "example.com", ["ns1.example.com", "ns2.example.com"])
+
+    monkeypatch.setattr(resolver, "_exchange", fake_exchange)
+    try:
+        result = await resolver.query_raw("example.com", TYPE_NS, use_cache=True)
+        assert [r.value for r in result.records] == ["ns1.example.com", "ns2.example.com"]
+        assert result.error is None
+        assert result.empty_noerror is False
+        # It must NOT be stored as a negative cache row.
+        assert await cache.aget("example.com", "NS") is None
+
+        again = await resolver.query_raw("example.com", TYPE_NS, use_cache=True)
+        assert [r.value for r in again.records] == ["ns1.example.com", "ns2.example.com"]
+        assert lookup_id["n"] == 2  # re-queried, not served from a poisoned cache
+    finally:
+        resolver.close()
+
+
 # --------------------------------------------------------------------------- #
 # TLS certificate expiry reads notAfter (the *second* timestamp)
 # --------------------------------------------------------------------------- #

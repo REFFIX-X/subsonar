@@ -21,7 +21,7 @@ from typing import Any, Iterable
 
 from .config import CACHE_DIR
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: TTL for a successful answer when the record itself carries no TTL.
 DEFAULT_POSITIVE_TTL = 900
@@ -149,6 +149,13 @@ class DNSCache:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
             )
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key='schema'"
+            ).fetchone()
+            if row is not None and str(row[0]) != str(SCHEMA_VERSION):
+                # A change in what a cached row *means* invalidates the old rows
+                # (e.g. NS/MX answers previously stored as negative "empty").
+                conn.execute("DELETE FROM dns_cache")
             conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema', ?)",
                 (str(SCHEMA_VERSION),),
