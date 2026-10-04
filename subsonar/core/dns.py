@@ -186,7 +186,9 @@ def encode_name(name: str) -> bytes:
 
 def build_query(name: str, qtype: int, *, qid: int | None = None) -> tuple[bytes, int]:
     """Build a recursive DNS query packet.  Returns ``(packet, query_id)``."""
-    query_id = qid if qid is not None else random.randint(0, 0xFFFF)
+    # 0 and 0xFFFF are never used: the connection's in-flight set is keyed on
+    # the id, and those two values made every such query a spurious failure.
+    query_id = qid if qid is not None else random.randint(1, 0xFFFE)
     header = struct.pack("!HHHHHH", query_id, FLAG_RD, 1, 0, 0, 0)
     question = encode_name(name) + struct.pack("!HH", qtype, CLASS_IN)
     return header + question, query_id
@@ -340,9 +342,9 @@ class DNSConnection:
     requests by DNS transaction ID, so the per-query cost collapses to a
     dictionary insert plus a future.
 
-    Transaction IDs are allocated uniquely per connection; if the 16-bit space
-    is ever exhausted the caller simply gets a fresh connection, so a collision
-    can never mis-attribute an answer.
+    Transaction IDs are drawn randomly and tracked in an in-flight set; an
+    in-flight collision is rejected with a :class:`DNSError` so the caller
+    retries on a fresh id rather than mis-attributing an answer.
     """
 
     def __init__(
@@ -357,9 +359,10 @@ class DNSConnection:
         self.on_unhealthy = on_unhealthy
         self._transport: asyncio.DatagramTransport | None = None
         self._pending: dict[int, asyncio.Future[bytes]] = {}
-        #: Free transaction IDs.  A ``set`` keeps ``in``/discard O(1) — a list
-        #: made every query scan ~65 k entries, twice.
-        self._free_ids: set[int] = set(range(1, 0xFFFF))
+        #: Transaction IDs currently in flight on this socket.  Only the handful
+        #: of active queries are held — the previous preallocated set of 65 533
+        #: ids per socket cost ~130 MB across the whole pool for no benefit.
+        self._inflight: set[int] = set()
         self._connecting: asyncio.Future[None] | None = None
         self._lock = asyncio.Lock()
         self.sent = 0
@@ -404,7 +407,7 @@ class DNSConnection:
         if future is None or future.done():
             self.mismatched += 1
             return
-        self._free_ids.add(qid)
+        self._inflight.discard(qid)
         future.set_result(data)
 
     def _fail_all(self, exc: Exception) -> None:
@@ -412,6 +415,7 @@ class DNSConnection:
             if not future.done():
                 future.set_exception(exc)
         self._pending.clear()
+        self._inflight.clear()
 
     def close(self) -> None:
         self._fail_all(ConnectionError("resolver connection closed"))
@@ -426,9 +430,9 @@ class DNSConnection:
     async def query(self, packet: bytes, qid: int, *, timeout: float | None = None) -> bytes:
         """Send *packet* and await the response carrying *qid*."""
         transport = await self._ensure_transport()
-        if qid not in self._free_ids:
+        if qid in self._inflight:
             raise DNSError(f"transaction id {qid} is already in flight")
-        self._free_ids.discard(qid)
+        self._inflight.add(qid)
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bytes] = loop.create_future()
@@ -452,7 +456,7 @@ class DNSConnection:
             )
         finally:
             self._pending.pop(qid, None)
-            self._free_ids.add(qid)
+            self._inflight.discard(qid)
 
     @property
     def in_flight(self) -> int:
@@ -796,7 +800,7 @@ class AnonymousResolver:
         if self.multiplex:
             connection = await self._pool.acquire(server, budget)
             self.queries_sent += 1
-            data = await connection.query(packet, expected_id)
+            data = await connection.query(packet, expected_id, timeout=budget)
             self.answers_received += 1
             return data
 
@@ -1278,6 +1282,26 @@ class AnonymousResolver:
                 await flush()
             except Exception:  # pragma: no cover - best effort
                 pass
+
+    async def purge_expired_cache(self) -> int:
+        """Drop expired rows once per run — the table otherwise grows forever."""
+        cache = self.disk_cache
+        if cache is None:
+            return 0
+        apurge = getattr(cache, "apurge", None)
+        if apurge is None:
+            return 0
+        try:
+            removed = await apurge()
+        except Exception:  # pragma: no cover - best effort
+            return 0
+        if removed:
+            self.bus.emit(
+                f"DNS cache — purged {removed:,} expired entr(ies)",
+                "debug",
+                "dns",
+            )
+        return removed or 0
 
     def transport_stats(self) -> dict[str, Any]:
         stats = self._pool.stats()

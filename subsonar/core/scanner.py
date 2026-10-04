@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 import socket
 import ssl
 import time
@@ -674,17 +675,34 @@ def parse_der_certificate(der: bytes) -> tuple[str | None, list[str]]:
     return common_name, sans
 
 
-def _der_expired(der: bytes) -> bool | None:
-    try:
-        import datetime as _dt
+#: UTCTime (tag 0x17) and GeneralizedTime (tag 0x18) values inside a DER cert.
+_TIME_RE = re.compile(rb"(?:\x17\x0d|\x18\x0f)([0-9]{12,14}Z)")
 
-        marker = b"\x17\x0d"  # UTCTime, 13 bytes
-        idx = der.find(marker)
-        if idx == -1:
+
+def _der_expired(der: bytes) -> bool | None:
+    """Return whether the certificate's ``notAfter`` is in the past.
+
+    ``getpeercert()`` returns nothing under ``CERT_NONE``, so expiry is read
+    from the raw DER.  The validity field holds ``notBefore`` then ``notAfter``,
+    so the **second** timestamp is the expiry — reading the first (as this used
+    to) compared ``notBefore`` against now and always reported "not expired".
+    """
+    try:
+        from datetime import datetime, timezone
+
+        stamps: list[datetime] = []
+        for match in _TIME_RE.finditer(der):
+            token = match.group(1)
+            # 12 digits + 'Z' = UTCTime (2-digit year); 14 + 'Z' = GeneralizedTime.
+            fmt = "%y%m%d%H%M%SZ" if len(token) == 13 else "%Y%m%d%H%M%SZ"
+            try:
+                when = datetime.strptime(token.decode("ascii"), fmt)
+            except ValueError:
+                continue
+            stamps.append(when.replace(tzinfo=timezone.utc))
+        if len(stamps) < 2:
             return None
-        raw = der[idx + 2 : idx + 15].decode("ascii", "replace")
-        expiry = _dt.datetime.strptime(raw, "%y%m%d%H%M%SZ")
-        return expiry < _dt.datetime.utcnow()
+        return stamps[1] < datetime.now(timezone.utc)
     except Exception:
         return None
 

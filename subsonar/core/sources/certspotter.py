@@ -14,17 +14,15 @@ ENDPOINT = (
 )
 
 
-def parse_dns_names(text: str) -> list[str]:
-    """Extract every ``dns_names`` entry from a CertSpotter JSON response.
-
-    The API answers with a JSON array of issuance objects; anything malformed
-    (HTML error page, rate-limit notice, truncated body) yields ``[]``.
-    """
-    out: list[str] = []
+def _loads(text: str) -> Any:
     try:
-        payload: Any = json.loads(text)
+        return json.loads(text)
     except Exception:
-        return out
+        return None
+
+
+def _names_from(payload: Any) -> list[str]:
+    out: list[str] = []
     if not isinstance(payload, list):
         return out
     for entry in payload:
@@ -39,6 +37,15 @@ def parse_dns_names(text: str) -> list[str]:
     return out
 
 
+def parse_dns_names(text: str) -> list[str]:
+    """Extract every ``dns_names`` entry from a CertSpotter JSON response.
+
+    The API answers with a JSON array of issuance objects; anything malformed
+    (HTML error page, rate-limit notice, truncated body) yields ``[]``.
+    """
+    return _names_from(_loads(text))
+
+
 @register
 class CertSpotterSource(DiscoverySource):
     """Certificate Transparency hostnames via the CertSpotter issuances API."""
@@ -48,13 +55,33 @@ class CertSpotterSource(DiscoverySource):
     requires_key = False
     description = "CertSpotter certificate-transparency log search (no key)"
     ENDPOINT = ENDPOINT
+    #: The issuances API caps a page (and paginates with an ``after`` cursor);
+    #: a single GET silently loses everything past the first page.
+    PAGE_SIZE = 100
+    MAX_PAGES = 10
 
     async def fetch_hosts(self, domain: str) -> AsyncIterator[str]:
-        status, text = await self.get_text(self.ENDPOINT.format(domain=domain))
-        if status != 200:
-            raise RuntimeError(f"CertSpotter returned HTTP {status}")
-        for host in parse_dns_names(text):
-            yield host
+        after: int | None = None
+        for _ in range(self.MAX_PAGES):
+            url = self.ENDPOINT.format(domain=domain)
+            if after is not None:
+                url += f"&after={after}"
+            status, text = await self.get_text(url)
+            if status != 200:
+                # A failure on a *later* page keeps what we already have.
+                if after is None:
+                    raise RuntimeError(f"CertSpotter returned HTTP {status}")
+                break
+            payload = _loads(text)
+            if not isinstance(payload, list) or not payload:
+                break
+            for host in _names_from(payload):
+                yield host
+            last = payload[-1]
+            cursor = last.get("id") if isinstance(last, dict) else None
+            if len(payload) < self.PAGE_SIZE or not isinstance(cursor, int):
+                break
+            after = cursor
 
 
 __all__ = ["ENDPOINT", "CertSpotterSource", "parse_dns_names"]

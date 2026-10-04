@@ -22,6 +22,7 @@ target's hosts.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
@@ -512,8 +513,44 @@ async def collect_dns_intel(
     domain = str(domain or "").strip().lower().rstrip(".")
     intel = DNSIntel(domain=domain)
 
+    candidates = list(dkim_selectors or DKIM_SELECTORS)[: max(0, max_dkim)]
+
+    async def _dkim_probe() -> list[str]:
+        found: list[str] = []
+        for selector in candidates:
+            name = f"{selector}._domainkey.{domain}"
+            for value in await _records(resolver, name, TYPE_TXT, log=False):
+                lowered = value.lower()
+                if "v=dkim1" in lowered or "p=" in lowered:
+                    found.append(selector)
+                    break
+        return found
+
+    # The apex lookups are independent of each other, so they are issued
+    # together: they used to run strictly one after another, each paying a full
+    # resolver round-trip, which made this phase ~15 sequential RTTs long.
+    (
+        mx_records,
+        ns_records,
+        soa_records,
+        txt_records,
+        caa_records,
+        ds_records,
+        dmarc_records,
+        dkim_hits,
+    ) = await asyncio.gather(
+        _records(resolver, domain, TYPE_MX, log=log),
+        _records(resolver, domain, TYPE_NS, log=log),
+        _records(resolver, domain, TYPE_SOA, log=log),
+        _records(resolver, domain, TYPE_TXT, log=log),
+        _records(resolver, domain, TYPE_CAA, log=False),
+        _records(resolver, domain, TYPE_DS, log=False),
+        _records(resolver, f"_dmarc.{domain}", TYPE_TXT, log=False),
+        _dkim_probe(),
+    )
+
     # -- MX ---------------------------------------------------------------- #
-    for value in await _records(resolver, domain, TYPE_MX, log=log):
+    for value in mx_records:
         parts = value.split()
         if len(parts) >= 2 and parts[0].isdigit():
             intel.mx.append((int(parts[0]), parts[1].lower().rstrip(".")))
@@ -523,12 +560,12 @@ async def collect_dns_intel(
     intel.mail_providers = infer_mail_provider(intel.mail_hosts)
 
     # -- NS / SOA ---------------------------------------------------------- #
-    for value in await _records(resolver, domain, TYPE_NS, log=log):
+    for value in ns_records:
         host = value.lower().rstrip(".")
         if host and host not in intel.ns:
             intel.ns.append(host)
     intel.dns_providers = infer_nameserver_provider(intel.ns)
-    for value in await _records(resolver, domain, TYPE_SOA, log=log):
+    for value in soa_records:
         parts = value.split()
         if len(parts) >= 2:
             mailbox = parts[1].lower().rstrip(".")
@@ -542,7 +579,7 @@ async def collect_dns_intel(
                 intel.dns_providers = infer_nameserver_provider([intel.soa["primary"]])
 
     # -- TXT: SPF + verification tokens ------------------------------------ #
-    for value in await _records(resolver, domain, TYPE_TXT, log=log):
+    for value in txt_records:
         text = value.strip()
         if text not in intel.txt:
             intel.txt.append(text)
@@ -583,25 +620,19 @@ async def collect_dns_intel(
             intel.mail_providers.append(vendor)
 
     # -- DKIM selectors ---------------------------------------------------- #
-    candidates = list(dkim_selectors or DKIM_SELECTORS)[: max(0, max_dkim)]
-    for selector in candidates:
-        name = f"{selector}._domainkey.{domain}"
-        for value in await _records(resolver, name, TYPE_TXT, log=False):
-            lowered = value.lower()
-            if "v=dkim1" in lowered or "p=" in lowered:
-                if selector not in intel.dkim_selectors:
-                    intel.dkim_selectors.append(selector)
-                break
+    for selector in dkim_hits:
+        if selector not in intel.dkim_selectors:
+            intel.dkim_selectors.append(selector)
 
     # -- DMARC ------------------------------------------------------------- #
-    for value in await _records(resolver, f"_dmarc.{domain}", TYPE_TXT, log=False):
+    for value in dmarc_records:
         if value.strip().lower().startswith("v=dmarc1"):
             intel.dmarc_record = value.strip()
             intel.dmarc = parse_dmarc(value)
             break
 
     # -- CAA --------------------------------------------------------------- #
-    for value in await _records(resolver, domain, TYPE_CAA, log=False):
+    for value in caa_records:
         parts = value.split(" ", 2)
         if len(parts) == 3:
             intel.caa.append((parts[0], parts[1].lower(), parts[2]))
@@ -609,7 +640,7 @@ async def collect_dns_intel(
             intel.caa.append((parts[0], parts[1].lower(), ""))
 
     # -- DNSSEC ------------------------------------------------------------ #
-    intel.dnssec = bool(await _records(resolver, domain, TYPE_DS, log=False))
+    intel.dnssec = bool(ds_records)
 
     intel.notes = intel.posture_notes()
     if bus is not None:

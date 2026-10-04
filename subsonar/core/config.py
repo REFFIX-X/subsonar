@@ -79,6 +79,39 @@ _assert_privacy()
 
 
 # --------------------------------------------------------------------------- #
+# Public-suffix guard
+# --------------------------------------------------------------------------- #
+#: Common multi-label public suffixes.  Scanning ``co.uk`` would make every
+#: ``*.co.uk`` name "in scope", so a target that *is* a public suffix is
+#: rejected up front.  A small curated set (no extra dependency); an uncommon
+#: suffix simply is not caught, and a registrable name under any of these
+#: (``example.co.uk``) is of course allowed.
+PUBLIC_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "co.uk", "org.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "sch.uk",
+        "ac.uk", "gov.uk", "nhs.uk", "police.uk", "mod.uk", "mil.uk",
+        "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
+        "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz", "geek.nz", "school.nz",
+        "co.jp", "ne.jp", "or.jp", "ac.jp", "ad.jp", "ed.jp", "go.jp", "gr.jp",
+        "com.br", "net.br", "org.br", "gov.br", "edu.br",
+        "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn",
+        "com.hk", "com.tw", "com.sg", "com.my", "com.ph", "com.vn",
+        "co.in", "net.in", "org.in", "gen.in", "firm.in", "ind.in", "gov.in",
+        "ac.in", "edu.in",
+        "co.za", "org.za", "net.za", "gov.za", "ac.za",
+        "co.kr", "or.kr", "ne.kr", "re.kr", "go.kr", "ac.kr",
+        "com.mx", "com.ar", "com.co", "com.pe", "com.ve", "com.ec", "com.uy",
+        "com.py", "com.bo", "com.do", "com.gt", "com.ni", "com.pa", "com.sv",
+        "com.hn",
+        "com.tr", "com.sa", "com.eg", "com.ng", "com.gh", "com.pk", "com.bd",
+        "com.np", "com.lk", "com.ua", "com.ru",
+        "co.il", "co.id", "co.th", "co.ke", "co.tz", "co.ug", "co.zw", "co.bw",
+        "co.mz",
+    }
+)
+
+
+# --------------------------------------------------------------------------- #
 # Embedded Top-50 web / infrastructure port matrix
 # --------------------------------------------------------------------------- #
 #: Exactly 50 ports ordered by real-world frequency of web interfaces, dev
@@ -458,6 +491,10 @@ class ScanConfig:
     mining_wave2: bool = True
     #: Cap on second-wave hosts.
     max_wave2_hosts: int = 200
+    #: Attempt an AXFR (zone transfer) against the target's nameservers.  Off by
+    #: default: it opens a direct TCP/53 connection to the target (attributable),
+    #: unlike the anonymous UDP DNS used everywhere else.
+    axfr: bool = False
     stealth_delay: tuple[float, float] = (0.0, 0.0)
     verify_tls: bool = False
     wildcard_filter: bool = True
@@ -475,6 +512,13 @@ class ScanConfig:
     dns_rate_override: bool = False
     #: Same idea for the port-sweep rate limit.
     port_rate_override: bool = False
+    #: True when the dns/port/http concurrency was supplied explicitly (CLI,
+    #: TOML or a direct ``ScanConfig(…)``), so :func:`apply_profile` must not
+    #: replace it with the profile's own pacing.
+    concurrency_override: bool = False
+    #: True when wildcard filtering was chosen explicitly, so the profile's
+    #: ``wildcard_check`` cannot silently switch it back on (or off).
+    wildcard_override: bool = False
 
     def __post_init__(self) -> None:
         self.domain = self.domain.strip().lower().rstrip(".")
@@ -486,6 +530,12 @@ class ScanConfig:
             raise ValueError(
                 f"invalid target domain: {self.domain!r} (expected e.g. example.com)"
             )
+        if self.domain in PUBLIC_SUFFIXES:
+            raise ValueError(
+                f"invalid target domain: {self.domain!r} is a public suffix — "
+                f"every name under it would be considered in scope "
+                f"(expected a registrable domain, e.g. example.{self.domain})"
+            )
         self.cache_dir = Path(self.cache_dir)
         self.output_dir = Path(self.output_dir)
         if self.ports != PORT_MATRIX:
@@ -496,6 +546,16 @@ class ScanConfig:
             self.dns_rate_override = True
         if self.port_rate_limit > 0 or self.port_rate_per_host > 0:
             self.port_rate_override = True
+        if (
+            self.dns_concurrency != DEFAULT_DNS_CONCURRENCY
+            or self.port_concurrency != DEFAULT_PORT_CONCURRENCY
+            or self.http_concurrency != DEFAULT_HTTP_CONCURRENCY
+        ):
+            # A caller who picked a concurrency meant it (profiles may set slower).
+            self.concurrency_override = True
+        if self.wildcard_filter is not True:
+            # Default is True; anything else was a deliberate choice.
+            self.wildcard_override = True
 
 
 #: Singleton default configuration used by the CLI entry point.

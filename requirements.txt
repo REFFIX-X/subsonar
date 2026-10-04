@@ -13,5 +13,6 @@ streamlit>=1.37          # optional local web dashboard (fragments + run_every f
 pandas>=2.0              # required by st.dataframe for the findings table
 
 # --- development -------------------------------------------------------------
-# pytest>=8.0
-# pytest-asyncio>=0.23
+# Installed by default so a fresh checkout can run its own test suite.
+pytest>=8.0
+pytest-asyncio>=0.23

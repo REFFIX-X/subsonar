@@ -499,13 +499,17 @@ class SubsonarApp(App):
 
     def _refresh_findings(self) -> None:
         runner = self.runner
-        if runner is None or runner.result is None:
+        # ``live_result`` is populated while the engine thread still runs;
+        # ``runner.result`` stays ``None`` until it returns, which left the table
+        # empty for the entire scan.
+        result = runner.live_result if runner is not None else None
+        if result is None:
             return
         table = self.query_one("#findings-table", DataTable)
-        if table.row_count == len(runner.result.findings):
+        if table.row_count == len(result.findings):
             return
         table.clear()
-        for index, finding in enumerate(runner.result.findings, start=1):
+        for index, finding in enumerate(result.findings, start=1):
             port_text = str(finding.port)
             if finding.aliases:
                 port_text += " +"
@@ -522,7 +526,7 @@ class SubsonarApp(App):
                 finding.url,
                 key=str(index),
             )
-        self.findings_count = len(runner.result.findings)
+        self.findings_count = len(result.findings)
 
     def _on_scan_finished(self) -> None:
         runner = self.runner
@@ -575,20 +579,22 @@ class SubsonarApp(App):
     def _finding_for_row(self, row_key: Any) -> Finding | None:
         """Row keys are the 1-based index into ``result.findings``."""
         runner = self.runner
-        if runner is None or runner.result is None:
+        result = runner.live_result if runner is not None else None
+        if result is None:
             return None
         try:
             index = int(str(row_key)) - 1
         except (TypeError, ValueError):
             return None
-        findings = runner.result.findings
+        findings = result.findings
         if 0 <= index < len(findings):
             return findings[index]
         return None
 
     def _selected_finding(self) -> Finding | None:
         runner = self.runner
-        if runner is None or runner.result is None:
+        result = runner.live_result if runner is not None else None
+        if result is None:
             return None
         table = self.query_one("#findings-table", DataTable)
         if table.row_count == 0:

@@ -914,7 +914,17 @@ async def _fetch_root(
     if declared is not None and not isinstance(declared, (str, bytes)):
         declared_headers = _norm_headers(declared)
 
-    if session is not None:
+    meta_headers = (
+        _norm_headers(getattr(meta, "response_headers", None)) if meta is not None else []
+    )
+    raw_body = getattr(meta, "response_body", b"") if meta is not None else b""
+    meta_body = bytes(raw_body) if isinstance(raw_body, (bytes, bytearray)) else b""
+    # Reuse the caller's response when it already carries headers *and* a body:
+    # the engine hands over the probe result precisely so we do not re-issue
+    # ``GET /`` against a host that was just verified.
+    reuse_meta = bool(meta_headers) and bool(meta_body)
+
+    if session is not None and not reuse_meta:
         fetched = await _fetch(
             session,
             _build_url(scheme, host, port, "/"),
@@ -930,6 +940,12 @@ async def _fetch_root(
             out.truncated = fetched.truncated
             out.source = "session"
 
+    if reuse_meta:
+        out.status = _coerce_status(getattr(meta, "status", None))
+        out.headers = meta_headers
+        out.body = meta_body
+        out.source = "meta"
+
     if out.status is None and meta is None:
         meta = await _call_probe(probe, host, ip, port, scheme, timeout)
         if meta is not None:
@@ -939,17 +955,22 @@ async def _fetch_root(
     if out.status is None and meta is not None:
         out.status = _coerce_status(getattr(meta, "status", None))
     if meta is not None and not out.body:
-        snippet = getattr(meta, "body_snippet", None)
-        if isinstance(snippet, str) and snippet:
-            out.body = snippet.encode("utf-8", "replace")
+        if meta_body:
+            out.body = meta_body
+        else:
+            snippet = getattr(meta, "body_snippet", None)
+            if isinstance(snippet, str) and snippet:
+                out.body = snippet.encode("utf-8", "replace")
     if not out.headers and declared_headers:
         out.headers = declared_headers
         if out.source == "none":
             out.source = "headers"
+    elif not out.headers and meta_headers:
+        out.headers = meta_headers
     elif not out.headers and meta is not None:
-        meta_headers = _norm_headers(getattr(meta, "headers", None))
-        if meta_headers:
-            out.headers = meta_headers
+        fallback_headers = _norm_headers(getattr(meta, "headers", None))
+        if fallback_headers:
+            out.headers = fallback_headers
     if out.source == "none" and out.status is not None:
         out.source = "meta"
     return out
@@ -979,9 +1000,10 @@ async def fingerprint(
       :class:`~subsonar.core.web_probe.WebProbe`, a bare ``aiohttp`` session, or
       a test double.  The session is discovered, never created (see
       :func:`_resolve_session`), so the caller's resolver/TLS policy is kept.
-    * ``meta`` — an already-obtained ``WebProbeResult``.  Supplying it avoids a
-      second ``GET /``; without it and without a reachable session the prober's
-      own ``probe()`` method is used.
+    * ``meta`` — an already-obtained ``WebProbeResult``.  When it carries the
+      response headers and body (the prober retains them), the second ``GET /``
+      is skipped entirely; otherwise it is a fallback when no live session is
+      reachable.
 
     Never raises: every network step is independently guarded, so the worst case
     is a result with fewer fields populated (recorded in ``notes``).

@@ -12,33 +12,37 @@ ENDPOINT = (
 )
 
 
+def parse_page(text: str) -> tuple[list[tuple[str, str | None]], bool]:
+    """Parse one OTX passive-DNS page into ``(pairs, has_next)``."""
+    out: list[tuple[str, str | None]] = []
+    try:
+        payload: Any = json.loads(text)
+    except Exception:
+        return out, False
+    if not isinstance(payload, dict):
+        return out, False
+    records = payload.get("passive_dns")
+    if isinstance(records, list):
+        for entry in records:
+            if not isinstance(entry, dict):
+                continue
+            host = entry.get("hostname")
+            if not isinstance(host, str) or not host.strip():
+                continue
+            address = entry.get("address")
+            out.append(
+                (host.strip(), address.strip() if isinstance(address, str) else None)
+            )
+    return out, bool(payload.get("has_next"))
+
+
 def parse_passive_dns(text: str) -> list[tuple[str, str | None]]:
     """Extract ``(hostname, address)`` pairs from an OTX passive-DNS response.
 
     ``passive_dns[].address`` is usually present but not guaranteed; a missing or
     non-literal address is reported as ``None``.
     """
-    out: list[tuple[str, str | None]] = []
-    try:
-        payload: Any = json.loads(text)
-    except Exception:
-        return out
-    if not isinstance(payload, dict):
-        return out
-    records = payload.get("passive_dns")
-    if not isinstance(records, list):
-        return out
-    for entry in records:
-        if not isinstance(entry, dict):
-            continue
-        host = entry.get("hostname")
-        if not isinstance(host, str) or not host.strip():
-            continue
-        address = entry.get("address")
-        out.append(
-            (host.strip(), address.strip() if isinstance(address, str) else None)
-        )
-    return out
+    return parse_page(text)[0]
 
 
 @register
@@ -50,13 +54,24 @@ class OTXSource(DiscoverySource):
     requires_key = False
     description = "AlienVault OTX passive DNS (no key)"
     ENDPOINT = ENDPOINT
+    #: OTX paginates passive-DNS results and signals more pages with ``has_next``.
+    MAX_PAGES = 10
 
     async def fetch_hosts(self, domain: str) -> AsyncIterator[tuple[str, str | None]]:
-        status, text = await self.get_text(self.ENDPOINT.format(domain=domain))
-        if status != 200:
-            raise RuntimeError(f"OTX returned HTTP {status}")
-        for host, address in parse_passive_dns(text):
-            yield host, address
+        for page in range(1, self.MAX_PAGES + 1):
+            url = self.ENDPOINT.format(domain=domain)
+            if page > 1:
+                url += f"?page={page}"
+            status, text = await self.get_text(url)
+            if status != 200:
+                if page == 1:
+                    raise RuntimeError(f"OTX returned HTTP {status}")
+                break
+            pairs, has_next = parse_page(text)
+            for host, address in pairs:
+                yield host, address
+            if not has_next or not pairs:
+                break
 
 
 __all__ = ["ENDPOINT", "OTXSource", "parse_passive_dns"]

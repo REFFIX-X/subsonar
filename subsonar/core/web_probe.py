@@ -83,6 +83,12 @@ class WebProbeResult:
     declared_length: int | None = None
     error: str | None = None
     attempted_schemes: list[str] = field(default_factory=list)
+    #: Response headers and the (capped) body, retained purely so the
+    #: fingerprinting layer can reuse this exact response instead of issuing a
+    #: second ``GET /``.  Deliberately omitted from :meth:`to_dict` — the body
+    #: is not part of the report.
+    response_headers: list[tuple[str, str]] = field(default_factory=list)
+    response_body: bytes = b""
 
     @property
     def clickable_url(self) -> str:
@@ -230,7 +236,6 @@ class WebProbe:
                 ),
                 "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Connection": "close",
             },
             trust_env=False,
         )
@@ -348,29 +353,41 @@ class WebProbe:
                     body, truncated = await self._read_body(response)
                     hop = response.history[0] if response.history else response
                     result.status = hop.status
-                    result.server = hop.headers.get("Server") or response.headers.get("Server")
-                    result.content_type = hop.headers.get("Content-Type")
                     result.redirect_chain = [str(h.url) for h in response.history]
                     result.final_url = str(response.url)
                     result.initial_status = hop.status
                     result.redirected = bool(response.history)
-                    if hop is not response:
-                        # The scanned port only bounced us: use the redirect's
-                        # own body so its title/length are never confused with
-                        # the content served on the redirect target.
+                    # A redirect that lands on a *different* port means the
+                    # scanned port only bounced us: report that port's own body,
+                    # never the content served by the redirect target.  aiohttp
+                    # has already released that hop's body, so it comes back
+                    # empty — which is correct for a redirect gateway.  A
+                    # same-port redirect keeps the *final* response, because the
+                    # port really does serve the page (overwriting it with the
+                    # empty hop body used to blank out live interfaces).
+                    bounced = hop is not response and is_redirect_only(result)
+                    source = hop.headers if bounced else response.headers
+                    if bounced:
                         hop_body, hop_truncated = await self._read_body(hop)
                         body, truncated = hop_body, hop_truncated
+                    result.server = source.get("Server") or response.headers.get("Server")
+                    result.content_type = source.get("Content-Type")
                     # Bytes actually read (bounded by ``max_body``, stopping at
                     # ``</head>``) — deliberately not the server's
                     # ``Content-Length``, which is recorded separately.
                     result.content_length = len(body)
                     result.declared_length = _int_or_none(
-                        hop.headers.get("Content-Length")
+                        source.get("Content-Length")
                     )
                     result.latency_ms = (time.perf_counter() - started) * 1000
                     title = extract_title(body, result.content_type)
                     result.title = title or _fallback_title(result)
                     result.body_snippet = _snippet(body)
+                    # Retain the exact response so fingerprinting can reuse it.
+                    result.response_headers = [
+                        (str(name), str(value)) for name, value in source.items()
+                    ]
+                    result.response_body = body
                     result.tls = scheme == "https"
                     if result.tls:
                         ssl_object = response.connection and getattr(

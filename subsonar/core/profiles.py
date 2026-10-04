@@ -329,11 +329,15 @@ def apply_profile(profile: Profile, config: Any) -> Any:
     config.profile_id = profile.id
     if not getattr(config, "ports_override", False):
         config.ports = profile.ports()
-    config.dns_concurrency = dns_c
-    config.port_concurrency = port_c
-    config.http_concurrency = http_c
+    # An explicit --dns/port/http-concurrency (or TOML/direct value) wins over
+    # the profile's pacing; otherwise the profile supplies a sane default.
+    if not getattr(config, "concurrency_override", False):
+        config.dns_concurrency = dns_c
+        config.port_concurrency = port_c
+        config.http_concurrency = http_c
     config.stealth_delay = PROFILE_DELAY[profile.id]
-    config.wildcard_filter = profile.wildcard_check
+    if not getattr(config, "wildcard_override", False):
+        config.wildcard_filter = profile.wildcard_check
     # An explicit --dns-rate/--port-rate (or TOML value) always wins over the
     # profile default; otherwise the profile supplies a sane, ban-safe pace.
     if not getattr(config, "dns_rate_override", False):

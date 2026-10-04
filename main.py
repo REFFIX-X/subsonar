@@ -337,6 +337,11 @@ def _add_common(parser: argparse.ArgumentParser, include_domain: bool = True) ->
         help="also resolve AAAA records and port-scan IPv6 addresses",
     )
     parser.add_argument(
+        "--axfr", action="store_true",
+        help="attempt a DNS zone transfer against the target's nameservers "
+             "(direct TCP/53 to the target — opt-in, not anonymous)",
+    )
+    parser.add_argument(
         "--confirm-resolvers", type=int, default=None, metavar="N",
         help="require N independent resolvers to agree on an address (2-3)",
     )
@@ -391,6 +396,8 @@ def _settings_from_args(args: argparse.Namespace) -> ScanSettings:
         settings.offline = True
     if getattr(args, "ipv6", False):
         settings.ipv6 = True
+    if getattr(args, "axfr", False):
+        settings.axfr = True
     if getattr(args, "no_adaptive_timeout", False):
         settings.adaptive_timeout = False
     if getattr(args, "no_multiplex_dns", False):

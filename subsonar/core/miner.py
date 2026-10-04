@@ -46,18 +46,38 @@ def _base_url(scheme: str, host: str, port: int) -> str:
     return f"{scheme}://{host}" + ("" if default else f":{port}")
 
 
+def _anonymous_connector(resolver: Any, limit: int) -> Any:
+    """Build a connector whose DNS goes through the anonymous pool.
+
+    Without this, aiohttp resolves the *in-scope* hostnames it is asked to fetch
+    (robots.txt, sitemap children) through the OS/ISP resolver — the exact leak
+    the rest of subsonar is built to avoid.
+    """
+    if resolver is None:
+        return aiohttp.TCPConnector(ssl=False, limit=limit)
+    try:
+        from .web_probe import AnonymousAiohttpResolver
+
+        return aiohttp.TCPConnector(
+            ssl=False, limit=limit, resolver=AnonymousAiohttpResolver(resolver)
+        )
+    except Exception:  # pragma: no cover - never let a resolver tweak break mining
+        return aiohttp.TCPConnector(ssl=False, limit=limit)
+
+
 async def fetch_paths(
     targets: Sequence[tuple[str, str, int]],
     *,
     paths: Sequence[str] = PATHS,
     timeout: float = 6.0,
+    resolver: Any = None,
 ) -> list[tuple[str, str, str]]:
     """Fetch *paths* from every target — returns ``[(host, path, body), …]``."""
     if aiohttp is None or not targets:
         return []
     out: list[tuple[str, str, str]] = []
     client_timeout = aiohttp.ClientTimeout(total=timeout, connect=4)
-    connector = aiohttp.TCPConnector(ssl=False, limit=8)
+    connector = _anonymous_connector(resolver, 8)
     async with aiohttp.ClientSession(
         timeout=client_timeout,
         connector=connector,
@@ -90,14 +110,14 @@ async def fetch_paths(
 
 
 async def fetch_urls(
-    urls: Sequence[str], *, timeout: float = 6.0
+    urls: Sequence[str], *, timeout: float = 6.0, resolver: Any = None
 ) -> list[tuple[str, str]]:
     """Fetch absolute URLs and return ``[(url, body), …]`` (lazy/small files)."""
     if aiohttp is None or not urls:
         return []
     out: list[tuple[str, str]] = []
     client_timeout = aiohttp.ClientTimeout(total=timeout, connect=4)
-    connector = aiohttp.TCPConnector(ssl=False, limit=4)
+    connector = _anonymous_connector(resolver, 4)
     async with aiohttp.ClientSession(
         timeout=client_timeout,
         connector=connector,
@@ -128,10 +148,11 @@ async def fetch_and_mine(
     bus: Any = None,
     concurrency: int = 6,
     timeout: float = 6.0,
+    resolver: Any = None,
 ) -> list[str]:
     """Fetch the well-known files and return every in-scope hostname in them."""
     del concurrency  # the session limit already bounds the parallelism
-    fetched = await fetch_paths(list(targets[:24]), timeout=timeout)
+    fetched = await fetch_paths(list(targets[:24]), timeout=timeout, resolver=resolver)
     if not fetched:
         return []
     found: list[str] = []
@@ -153,7 +174,7 @@ async def fetch_and_mine(
                 children.append(url)
     if children:
         for url, body in await fetch_urls(
-            children[:MAX_SITEMAP_CHILDREN], timeout=timeout
+            children[:MAX_SITEMAP_CHILDREN], timeout=timeout, resolver=resolver
         ):
             fetched.append((url.split("/")[2], "/sitemap.xml", body))
 

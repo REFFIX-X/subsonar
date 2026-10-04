@@ -11,6 +11,7 @@ or through the CLI::
 
 from __future__ import annotations
 
+import html
 import os
 from collections import deque
 from typing import Any, Sequence
@@ -330,9 +331,10 @@ def _stat_cards(snapshot: dict[str, Any]) -> None:
 
 
 def _escape(text: str) -> str:
-    return (
-        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    )
+    # ``quote=True`` matters: the result is interpolated into single-quoted
+    # attributes (``title='…'``, ``href='…'``), so a value containing a quote
+    # would otherwise break out of the attribute.
+    return html.escape(str(text), quote=True)
 
 
 def _findings_rows(findings: list[Finding]) -> list[dict[str, Any]]:

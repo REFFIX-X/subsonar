@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 __all__ = ["TemplateMatch", "TemplateRule", "TEMPLATES", "run_template_checks"]
 
@@ -60,7 +60,9 @@ TEMPLATES: tuple[TemplateRule, ...] = (
         "critical",
         "A /.env file is being served (secrets are likely inside).",
         ("/.env",),
-        frozenset({200, 301, 302}),
+        # 200 only: a 301/302 is what a catch-all server returns for *every*
+        # unknown path (the soft-404), which is not evidence of a served file.
+        frozenset({200}),
     ),
     TemplateRule(
         "git-config-exposed",
@@ -161,11 +163,16 @@ async def run_template_checks(
     port: int,
     *,
     concurrency: int = 8,
+    known_statuses: Mapping[str, int] | None = None,
 ) -> list[TemplateMatch]:
     """Run every template against ``scheme://host:port`` and return matches.
 
     *probe* must expose ``probe_status(host, port, path, scheme=...)`` returning
     a ``dict`` with a ``status`` key (the :class:`WebProbe` API).  Never raises.
+
+    *known_statuses* maps a path to a status the caller already measured (the
+    fingerprinter probes several of the same paths), so those are not fetched a
+    second time.
     """
     if probe is None:
         return []
@@ -173,6 +180,7 @@ async def run_template_checks(
     if checker is None:
         return []
 
+    known = dict(known_statuses or {})
     jobs: list[tuple[TemplateRule, str]] = [
         (rule, path) for rule in TEMPLATES for path in rule.paths
     ]
@@ -181,12 +189,15 @@ async def run_template_checks(
     seen_rules: set[str] = set()
 
     async def one(rule: TemplateRule, path: str) -> None:
-        async with limiter:
-            try:
-                info = await checker(host, port, path, scheme=scheme)
-            except Exception:  # pragma: no cover - best effort
-                return
-        status = info.get("status") if isinstance(info, dict) else None
+        if path in known:
+            status: int | None = known[path]
+        else:
+            async with limiter:
+                try:
+                    info = await checker(host, port, path, scheme=scheme)
+                except Exception:  # pragma: no cover - best effort
+                    return
+            status = info.get("status") if isinstance(info, dict) else None
         if status in rule.statuses and rule.id not in seen_rules:
             seen_rules.add(rule.id)
             matches.append(

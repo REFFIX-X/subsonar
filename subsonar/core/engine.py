@@ -320,6 +320,8 @@ class ScanResult:
         self.mined_hosts: set[str] = set()
         #: Hosts that were resolved and scanned in the mining second wave.
         self.wave2_hosts: set[str] = set()
+        #: AXFR outcomes (one dict per nameserver address), when ``--axfr`` is on.
+        self.zone_transfers: list[dict[str, Any]] = []
         #: ``{ip: ptr_name}`` for the addresses that answered with a PTR record.
         self.ptr: dict[str, str] = {}
         #: Offline geo index statistics (entries, age, sources).
@@ -381,6 +383,7 @@ class ScanResult:
             "dns_intel": self.dns_intel.to_dict() if self.dns_intel else None,
             "mined_hosts": sorted(self.mined_hosts),
             "wave2_hosts": sorted(self.wave2_hosts),
+            "zone_transfers": list(self.zone_transfers),
             "ptr": dict(self.ptr),
             "geo": dict(self.geo),
             "findings": [finding.to_dict() for finding in self.findings],
@@ -440,6 +443,19 @@ def _version() -> str:
     from .. import __version__
 
     return __version__
+
+
+def _wildcard_signature(probe: WebProbeResult) -> str:
+    """Stable identity of a wildcard HTTP response.
+
+    Uses the body fingerprint when one was computed, and otherwise falls back to
+    a length/content-type token — so a catch-all server that answers every
+    subdomain with the *same* (uncharacteristic, hash-less) page is still caught
+    instead of being reported as one interface per host.
+    """
+    if probe.fingerprint:
+        return probe.fingerprint
+    return f"len:{probe.content_length}:{probe.content_type or ''}"
 
 
 # --------------------------------------------------------------------------- #
@@ -550,6 +566,7 @@ class ScanEngine:
         for line in self.describe_plan():
             bus.emit(line, "info", "config")
         try:
+            await self._resolver.purge_expired_cache()
             await self._phase_health()
             await self._phase_geo()
             await self._phase_dns_intel()
@@ -816,7 +833,11 @@ class ScanEngine:
             ]
             try:
                 mined = await fetch_and_mine(
-                    targets, self.config.domain, bus=bus, concurrency=6
+                    targets,
+                    self.config.domain,
+                    bus=bus,
+                    concurrency=6,
+                    resolver=self._resolver,
                 )
             except Exception as exc:  # noqa: BLE001 - mining is best effort
                 bus.warn(f"Web mining failed ({exc.__class__.__name__}: {exc})")
@@ -1067,6 +1088,7 @@ class ScanEngine:
                 finding.subdomain,
                 finding.ip,
                 finding.port,
+                known_statuses=finding.data_files,
             )
         except asyncio.CancelledError:
             raise
@@ -1325,6 +1347,9 @@ class ScanEngine:
         if self.profile.brute:
             await self._phase_brute(add)
 
+        if self.config.axfr:
+            await self._phase_axfr(add)
+
         if self.config.enable_discovery:
             await self._phase_discovery(add)
 
@@ -1351,6 +1376,44 @@ class ScanEngine:
             f"/ {len(self.result.discovered_hosts)} active discovery)"
         )
         return ordered
+
+    async def _phase_axfr(self, add: Callable[[str], bool]) -> None:
+        """Attempt a DNS zone transfer (opt-in: it talks to the target's NS)."""
+        bus = self.bus
+        try:
+            from .axfr import attempt_zone_transfer
+        except Exception:  # pragma: no cover - module unavailable
+            return
+        bus.phase("AXFR — zone-transfer attempt against the authoritative nameservers")
+        try:
+            transfers = await attempt_zone_transfer(
+                self._resolver, self.config.domain, bus=bus
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - best effort
+            bus.warn(f"AXFR failed ({exc.__class__.__name__}: {exc})")
+            return
+        self.result.zone_transfers = [t.to_dict() for t in transfers]
+        allowed = [t for t in transfers if t.ok]
+        if not allowed:
+            bus.emit(
+                "AXFR — no nameserver permitted a zone transfer "
+                f"({len(transfers)} tried)",
+                "info",
+                "osint",
+            )
+            return
+        added = 0
+        for transfer in allowed:
+            for name in transfer.names:
+                if add(name):
+                    added += 1
+                    self.result.osint_hosts.add(name)
+        bus.warn(
+            f"AXFR — {len(allowed)} nameserver(s) allowed a full zone transfer; "
+            f"{added} new in-scope host(s) recovered"
+        )
 
     async def _phase_discovery(self, add: Callable[[str], bool]) -> None:
         """Active discovery: SAN harvesting, CNAME chasing, permutations."""
@@ -1606,8 +1669,8 @@ class ScanEngine:
                     probe = await self._probe.probe(candidate, candidate, port)
                 except Exception:
                     continue
-                if probe.ok and probe.fingerprint:
-                    return probe.fingerprint
+                if probe.ok:
+                    return _wildcard_signature(probe)
             return None
 
         report = await self._resolver.detect_wildcard(
@@ -1895,12 +1958,11 @@ class ScanEngine:
             or not report.wildcard
             or not self.config.wildcard_filter
             or not report.http_fingerprints
-            or not probe.fingerprint
         ):
             return False
         if probe.host == self.config.domain or probe.host in self.result.osint_hosts:
             return False
-        return probe.fingerprint in report.http_fingerprints
+        return _wildcard_signature(probe) in report.http_fingerprints
 
     # -- phase 4: ports + HTTP -------------------------------------------- #
     async def _phase_scan(self, resolved: Sequence[DNSResult]) -> None:
@@ -2251,13 +2313,14 @@ class ScanEngine:
             f"dns concurrency   : {cfg.dns_concurrency}",
             f"port concurrency  : {cfg.port_concurrency}",
             f"http concurrency  : {cfg.http_concurrency}",
-        f"dns timeout       : {cfg.dns_timeout}s (per name: "
-        f"{cfg.dns_name_deadline:g}s budget, {cfg.dns_concurrency} in flight)",
+            f"dns timeout       : {cfg.dns_timeout}s (per name: "
+            f"{cfg.dns_name_deadline:g}s budget, {cfg.dns_concurrency} in flight)",
             f"tcp timeout       : {cfg.tcp_timeout}s",
             f"http timeout      : {cfg.http_timeout}s",
             f"wildcard check    : {'enabled' if profile.wildcard_check else 'disabled'}",
             f"stealth delay     : {cfg.stealth_delay[0]:.2f}-{cfg.stealth_delay[1]:.2f}s",
             f"carry over        : {'merge previous report' if cfg.carry_over else 'off'}",
+            f"axfr zone transfer: {'enabled' if cfg.axfr else 'disabled (opt-in --axfr)'}",
             f"enrichment        : geo {'on' if cfg.geoip else 'off'} · dns-intel "
             f"{'on' if cfg.dns_intel else 'off'} · ptr {'on' if cfg.reverse_dns else 'off'}"
             f" · mining {'on' if cfg.web_mining else 'off'}",

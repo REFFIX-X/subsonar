@@ -14,7 +14,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
 try:  # pragma: no cover
     import aiohttp
@@ -98,17 +98,15 @@ def cache_path_for(url: str, cache_dir: Path | None = None) -> Path:
     return directory / f"seclists-{name}"
 
 
-def parse_wordlist(text: str, *, limit: int | None = None, domain: str = "") -> list[str]:
-    """Normalise wordlist lines into unique candidate labels.
-
-    When *domain* is supplied, fully-qualified entries are reduced to their
-    leading label and out-of-scope names are dropped.
-    """
+def _parse_lines(
+    lines: Iterable[str], *, limit: int | None = None, domain: str = ""
+) -> list[str]:
+    """Normalise wordlist *lines* into unique candidate labels."""
     seen: set[str] = set()
     words: list[str] = []
     domain = (domain or "").strip().lower().rstrip(".")
     suffix = f".{domain}" if domain else ""
-    for raw in text.splitlines():
+    for raw in lines:
         line = raw.strip().lower()
         if not line or line.startswith("#"):
             continue
@@ -134,6 +132,34 @@ def parse_wordlist(text: str, *, limit: int | None = None, domain: str = "") -> 
         if limit is not None and len(words) >= limit:
             break
     return words
+
+
+def parse_wordlist(text: str, *, limit: int | None = None, domain: str = "") -> list[str]:
+    """Normalise a wordlist *string* into unique candidate labels.
+
+    When *domain* is supplied, fully-qualified entries are reduced to their
+    leading label and out-of-scope names are dropped.
+    """
+    return _parse_lines(text.splitlines(), limit=limit, domain=domain)
+
+
+def parse_wordlist_file(
+    path: Path, *, limit: int | None = None, domain: str = ""
+) -> list[str]:
+    """Stream a wordlist *file*, stopping as soon as *limit* labels are found.
+
+    Reading the file line-by-line (instead of ``handle.read()``) means a 2M-line
+    list the profile only needs 5 000 labels from no longer materialises 2M
+    Python strings — and it stops parsing at the first *limit* in-scope labels.
+    """
+    for encoding in ("utf-8", "latin-1"):
+        try:
+            with open(path, "r", encoding=encoding, errors="strict") as handle:
+                return _parse_lines(handle, limit=limit, domain=domain)
+        except UnicodeDecodeError:
+            continue
+    with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+        return _parse_lines(handle, limit=limit, domain=domain)
 
 
 class WordlistManager:
@@ -355,8 +381,9 @@ class WordlistManager:
         result = WordlistResult(cached_path=path, wordlist=self.name)
         raw_words: list[str] = []
         if path is not None and path.exists():
-            text = await asyncio.to_thread(_read_text, path)
-            raw_words = parse_wordlist(text, domain=domain)
+            raw_words = await asyncio.to_thread(
+                parse_wordlist_file, path, limit=limit, domain=domain
+            )
             result.source = path.name
             result.from_cache = True
             result.downloaded_bytes = path.stat().st_size
@@ -385,17 +412,6 @@ class WordlistManager:
     def embedded(self, limit: int | None = None) -> list[str]:
         words = list(EMBEDDED_SEED)
         return words[:limit] if limit else words
-
-
-def _read_text(path: Path) -> str:
-    for encoding in ("utf-8", "latin-1"):
-        try:
-            with open(path, "r", encoding=encoding, errors="strict") as handle:
-                return handle.read()
-        except UnicodeDecodeError:
-            continue
-    with open(path, "r", encoding="utf-8", errors="ignore") as handle:
-        return handle.read()
 
 
 def _human(size: float) -> str:

@@ -622,10 +622,22 @@ def parse_rir_line(raw: str) -> tuple[int, str, str, int, str, str] | None:
     if size <= 0:
         return None
     family, start_key = start
-    span = int(start_key, 16) + size - 1
-    if family == 4 and span > 0xFFFFFFFF:
-        return None
-    end_key = _key_v4(span) if family == 4 else _key_v6(span)
+    if family == 4:
+        # IPv4 RIR records carry an *address count* in the value field.
+        span = int(start_key, 16) + size - 1
+        if span > 0xFFFFFFFF:
+            return None
+        end_key = _key_v4(span)
+    else:
+        # IPv6 RIR records carry a *prefix length*, not a count: ``2400:cb00::|32``
+        # means 2**(128-32) addresses.  Treating 32 as a count collapsed the
+        # range to nothing and mis-mapped the whole allocation.
+        if size > 128:
+            return None
+        span = int(start_key, 16) + (1 << (128 - size)) - 1
+        if span > (1 << 128) - 1:
+            return None
+        end_key = _key_v6(span)
     return (family, start_key, end_key, 0, _clean_country(parts[1]), "")
 
 
@@ -839,6 +851,10 @@ def load_index(
     if index.count == 0:
         index.close()
         return None
+    previous = _INDEX_CACHE.get(key)
+    if previous is not None:
+        # A refresh must not leak the previous SQLite connection.
+        previous.close()
     _INDEX_CACHE[key] = index
     return index
 
@@ -1079,10 +1095,11 @@ def write_index(
 
 
 def _info(bus: Any, message: str) -> None:
+    _log.info(message)
     if bus is None:
         return
     try:
-        bus.info(message)
+        bus.emit(message, "info", "geo")
     except Exception:  # pragma: no cover - a logging failure is not fatal
         pass
 

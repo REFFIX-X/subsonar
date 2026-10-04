@@ -64,6 +64,8 @@ class ScanSettings:
     multiplex_dns: bool = True
     disk_cache: bool = True
     ipv6: bool = False
+    #: Attempt a DNS zone transfer (opt-in; talks to the target's nameservers).
+    axfr: bool = False
     confirm_resolvers: int = 0
     enable_san: bool = True
     enable_permutations: bool = True
@@ -184,6 +186,13 @@ class ScanSettings:
             value = getattr(self, attribute)
             if value is not None:
                 setattr(config, attribute, value)
+        if any(
+            getattr(self, name) is not None
+            for name in ("dns_concurrency", "port_concurrency", "http_concurrency")
+        ):
+            # The values were written after construction, so __post_init__ could
+            # not flag them; protect them from the profile.
+            config.concurrency_override = True
         if self.dns_deadline is not None:
             config.dns_name_deadline = max(0.0, float(self.dns_deadline))
         # The discovery/accuracy switches are plain bools with defaults, so they
@@ -194,6 +203,7 @@ class ScanSettings:
         config.enable_discovery = bool(
             self.enable_san or self.enable_permutations or self.enable_cnames
         )
+        config.axfr = self.axfr
         config.multiplex_dns = self.multiplex_dns
         config.disk_cache = self.disk_cache
         config.adaptive_timeout = self.adaptive_timeout

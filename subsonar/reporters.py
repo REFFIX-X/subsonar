@@ -9,8 +9,11 @@ from __future__ import annotations
 import csv
 import html
 import json
+import os
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Iterator, Sequence, TextIO
 
 from .core.engine import Finding, ScanResult
 
@@ -54,19 +57,48 @@ def _ensure_parent(path: Path) -> Path:
     return path
 
 
-def write_json(result: ScanResult, path: Path) -> Path:
+@contextmanager
+def _atomic_write(path: Path, *, newline: str | None = None) -> Iterator[TextIO]:
+    """Write *path* through a temp file + ``os.replace``.
+
+    A crash mid-write otherwise leaves a truncated report, which a later
+    carry-over read would silently ignore — losing the previous scan's findings.
+    """
     path = _ensure_parent(path)
-    with open(path, "w", encoding="utf-8") as handle:
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as handle:
+            yield handle
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _md_cell(value: Any) -> str:
+    """Escape one Markdown table cell: collapse newlines and escape pipes."""
+    text = " ".join(str(value).split())
+    return text.replace("\\", "\\\\").replace("|", "\\|")
+
+
+def write_json(result: ScanResult, path: Path) -> Path:
+    path = Path(path)
+    with _atomic_write(path) as handle:
         json.dump(result.to_dict(), handle, indent=2, ensure_ascii=False)
     return path
 
 
 def write_jsonl(result: ScanResult, path: Path) -> Path:
     """Newline-delimited JSON: one metadata line, then one finding per line."""
-    path = _ensure_parent(path)
+    path = Path(path)
     payload = result.to_dict()
     findings = payload.pop("findings", [])
-    with open(path, "w", encoding="utf-8") as handle:
+    with _atomic_write(path) as handle:
         handle.write(json.dumps({"event": "meta", "data": payload}, ensure_ascii=False))
         handle.write("\n")
         for finding in findings:
@@ -116,8 +148,8 @@ class JsonlSink:
 
 
 def write_csv(result: ScanResult, path: Path) -> Path:
-    path = _ensure_parent(path)
-    with open(path, "w", encoding="utf-8", newline="") as handle:
+    path = Path(path)
+    with _atomic_write(path, newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(CSV_COLUMNS))
         writer.writeheader()
         for finding in result.findings:
@@ -126,7 +158,7 @@ def write_csv(result: ScanResult, path: Path) -> Path:
 
 
 def write_markdown(result: ScanResult, path: Path) -> Path:
-    path = _ensure_parent(path)
+    path = Path(path)
     lines: list[str] = []
     lines.append(f"# subsonar report — {result.config.domain}")
     lines.append("")
@@ -140,7 +172,7 @@ def write_markdown(result: ScanResult, path: Path) -> Path:
     lines.append("| --- | --- |")
     for line in result.summary_lines():
         key, _, value = line.partition(":")
-        lines.append(f"| {key.strip()} | {value.strip()} |")
+        lines.append(f"| {_md_cell(key.strip())} | {_md_cell(value.strip())} |")
     if result.wildcard and result.wildcard.wildcard:
         lines.append("")
         lines.append(
@@ -158,13 +190,13 @@ def write_markdown(result: ScanResult, path: Path) -> Path:
         )
         lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for index, finding in enumerate(result.findings, start=1):
-            title = (finding.title or "").replace("|", "\\|")[:60]
+            title = _md_cell(finding.title or "")[:60]
             if finding.from_previous_scan:
                 title = f"_(prev)_ {title}".strip()
             port_text = str(finding.port)
             if finding.aliases:
                 port_text += " (+" + ", ".join(str(p) for p in finding.aliases) + ")"
-            tech = ", ".join(finding.technologies[:4]).replace("|", "\\|")
+            tech = _md_cell(", ".join(finding.technologies[:4]))
             geo = finding.geo_label or ""
             if finding.asn:
                 geo = f"{geo} AS{finding.asn}".strip()
@@ -185,8 +217,10 @@ def write_markdown(result: ScanResult, path: Path) -> Path:
         for finding in exposed:
             for exp in finding.exposures:
                 lines.append(
-                    f"| `{finding.subdomain}` | {exp.get('severity', '?')} | "
-                    f"{exp.get('name', '')} | {exp.get('evidence', '')} |"
+                    f"| `{_md_cell(finding.subdomain)}` | "
+                    f"{_md_cell(exp.get('severity', '?'))} | "
+                    f"{_md_cell(exp.get('name', ''))} | "
+                    f"{_md_cell(exp.get('evidence', ''))} |"
                 )
     if result.mined_hosts:
         lines.append("")
@@ -202,7 +236,7 @@ def write_markdown(result: ScanResult, path: Path) -> Path:
         lines.append("| --- | --- |")
         for host in sorted(result.mined_hosts):
             marker = "yes" if host in result.wave2_hosts else ""
-            lines.append(f"| `{host}` | {marker} |")
+            lines.append(f"| `{_md_cell(host)}` | {marker} |")
     intel = result.dns_intel
     if intel is not None:
         lines.append("")
@@ -212,7 +246,7 @@ def write_markdown(result: ScanResult, path: Path) -> Path:
         lines.append("| --- | --- |")
         for signal in intel.signals():
             key, _, value = signal.partition(":")
-            lines.append(f"| {key.strip()} | {value.strip().replace('|', '/')} |")
+            lines.append(f"| {_md_cell(key.strip())} | {_md_cell(value.strip())} |")
         if intel.notes:
             lines.append("")
             lines.append("**Posture**")
@@ -265,7 +299,8 @@ def write_markdown(result: ScanResult, path: Path) -> Path:
         "_Generated by subsonar — asynchronous subdomain & web-interface sonar._"
     )
     lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    with _atomic_write(path) as handle:
+        handle.write("\n".join(lines))
     return path
 
 
@@ -379,7 +414,7 @@ def _intel_html(result: ScanResult) -> str:
 def write_html(result: ScanResult, path: Path) -> Path:
     from .core.theme import Palette
 
-    path = _ensure_parent(path)
+    path = Path(path)
     rows: list[str] = []
     kind_colour = {
         "interface": Palette.GREEN,
@@ -488,12 +523,13 @@ def write_html(result: ScanResult, path: Path) -> Path:
 {_intel_html(result)}
 </body></html>
 """
-    path.write_text(document, encoding="utf-8")
+    with _atomic_write(path) as handle:
+        handle.write(document)
     return path
 
 
 def write_text(result: ScanResult, path: Path) -> Path:
-    path = _ensure_parent(path)
+    path = Path(path)
     lines = [
         "subsonar — asynchronous subdomain & web-interface sonar",
         "=" * 78,
@@ -512,7 +548,113 @@ def write_text(result: ScanResult, path: Path) -> Path:
     if not result.findings:
         lines.append("No web interface confirmed on this target.")
     lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    with _atomic_write(path) as handle:
+        handle.write("\n".join(lines))
+    return path
+
+
+def write_urls(result: ScanResult, path: Path) -> Path:
+    """One actionable URL per line — pipes straight into httpx/nuclei/gau."""
+    path = Path(path)
+    with _atomic_write(path) as handle:
+        for finding in result.findings:
+            handle.write(finding.link + "\n")
+    return path
+
+
+#: Template severity → SARIF result level.
+_SEVERITY_TO_SARIF: dict[str, str] = {
+    "critical": "error",
+    "high": "error",
+    "medium": "warning",
+    "low": "note",
+    "info": "note",
+}
+
+
+def to_sarif(result: ScanResult) -> dict[str, Any]:
+    """Render the result as SARIF 2.1.0 for CI/security-tooling consumption."""
+    from . import __version__
+
+    rules: dict[str, dict[str, Any]] = {}
+
+    def rule(rule_id: str, name: str, level: str) -> None:
+        rules.setdefault(
+            rule_id,
+            {
+                "id": rule_id,
+                "name": name,
+                "shortDescription": {"text": name},
+                "defaultConfiguration": {"level": level},
+            },
+        )
+
+    rule("subsonar.web-interface", "Web interface exposed", "note")
+    sarif_results: list[dict[str, Any]] = []
+    for finding in result.findings:
+        sarif_results.append(
+            {
+                "ruleId": "subsonar.web-interface",
+                "level": "note",
+                "message": {
+                    "text": f"{finding.scheme}://{finding.host_port} — "
+                    f"{finding.title or 'no title'} ({finding.status})"
+                },
+                "locations": [
+                    {"physicalLocation": {"artifactLocation": {"uri": finding.link}}}
+                ],
+                "properties": {
+                    "confidence": finding.confidence,
+                    "confidenceLabel": finding.confidence_label,
+                    "kind": finding.kind,
+                },
+            }
+        )
+        for exposure in getattr(finding, "exposures", None) or []:
+            rule_id = "subsonar." + str(exposure.get("id") or "check")
+            level = _SEVERITY_TO_SARIF.get(
+                str(exposure.get("severity") or "info").lower(), "note"
+            )
+            rule(rule_id, str(exposure.get("name") or rule_id), level)
+            sarif_results.append(
+                {
+                    "ruleId": rule_id,
+                    "level": level,
+                    "message": {
+                        "text": f"{exposure.get('name', 'check')} — "
+                        f"{exposure.get('evidence', '')}"
+                    },
+                    "locations": [
+                        {
+                            "physicalLocation": {
+                                "artifactLocation": {"uri": finding.link}
+                            }
+                        }
+                    ],
+                }
+            )
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "subsonar",
+                        "version": __version__,
+                        "rules": list(rules.values()),
+                    }
+                },
+                "results": sarif_results,
+            }
+        ],
+    }
+
+
+def write_sarif(result: ScanResult, path: Path) -> Path:
+    path = Path(path)
+    with _atomic_write(path) as handle:
+        json.dump(to_sarif(result), handle, indent=2, ensure_ascii=False)
     return path
 
 
@@ -526,10 +668,19 @@ WRITERS = {
     "html": (write_html, ".html"),
     "txt": (write_text, ".txt"),
     "text": (write_text, ".txt"),
+    # Interop formats — opt-in via ``--formats`` (not written by default).
+    "urls": (write_urls, ".urls.txt"),
+    "sarif": (write_sarif, ".sarif"),
 }
 
 #: Accepted spelling variants → canonical writer key.
-FORMAT_ALIASES: dict[str, str] = {"markdown": "md", "text": "txt", "ndjson": "jsonl"}
+FORMAT_ALIASES: dict[str, str] = {
+    "markdown": "md",
+    "text": "txt",
+    "ndjson": "jsonl",
+    "url": "urls",
+    "urllist": "urls",
+}
 
 #: Canonical formats, in the order reports are written.
 CANONICAL_FORMATS: tuple[str, ...] = ("json", "csv", "md", "html", "txt")

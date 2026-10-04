@@ -348,7 +348,11 @@ class EventBus:
         setattr(self.stats, field_name, max(minimum, current + amount))
 
     def bump_source(self, source: str, amount: int) -> None:
-        self.stats.sources[source] = self.stats.sources.get(source, 0) + amount
+        # Unlike the integer counters, a dict cannot be mutated while
+        # ``snapshot()`` copies it without risking "dictionary changed size
+        # during iteration", so this one takes the lock.
+        with self._lock:
+            self.stats.sources[source] = self.stats.sources.get(source, 0) + amount
 
     def set_field(self, field_name: str, value: Any) -> None:
         setattr(self.stats, field_name, value)
