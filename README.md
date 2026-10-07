@@ -1,11 +1,6 @@
-```
-   ███████╗██╗   ██╗██████╗ ███████╗ ██████╗ ███╗   ██╗ █████╗ ██████╗
-   ██╔════╝██║   ██║██╔══██╗██╔════╝██╔═══██╗████╗  ██║██╔══██╗██╔══██╗
-   ███████╗██║   ██║██████╔╝███████╗██║   ██║██╔██╗ ██║███████║██████╔╝
-   ╚════██║██║   ██║██╔══██╗╚════██║██║   ██║██║╚██╗██║██╔══██║██╔══██╗
-   ███████║╚██████╔╝██████╔╝███████║╚██████╔╝██║ ╚████║██║  ██║██║  ██║
-   ╚══════╝ ╚═════╝ ╚═════╝ ╚══════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝  ╚═╝
-```
+<p align="center">
+  <img src="assets/banner.png" alt="subsonar — asynchronous subdomain & web-interface sonar" width="100%">
+</p>
 
 # subsonar
 
@@ -555,6 +550,8 @@ removes both caps and leaves only concurrency limits.
 | Multi-resolver confirmation | `--confirm-resolvers 2` |
 | Performance tuning | `--host-batch`, `--tcp-fast-timeout`, `--port-concurrency`, `--max-candidates` |
 | Caching / transport | `--no-disk-cache`, `--no-multiplex-dns`, `--no-adaptive-timeout` |
+| Zone transfer (opt-in) | `--axfr` — direct TCP/53 AXFR against the target's own nameservers (attributable, unlike the anonymous UDP DNS) |
+| Output formats | `--formats json,csv,md,html,txt,urls,sarif` · `--jsonl` (live NDJSON) |
 | Workflow | `--resume`, `--no-state`, `--config`, `--domains` |
 
 ---
@@ -1149,7 +1146,7 @@ TUI; `.streamlit/config.toml` mirrors the same values for Streamlit's own chrome
 ## Testing
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests -q     # 545 tests
+.\.venv\Scripts\python.exe -m pytest tests -q     # 605 tests
 .\.venv\Scripts\python.exe main.py selftest       # 26/26 engine checks
 python tools/selftest_bounded.py                  # same, hard 90 s timeout
 ```
@@ -1202,3 +1199,7 @@ subsonar is built for **authorised** security testing, asset discovery on domain
 you own, and CTF/lab work. Port scanning and brute-forcing third-party
 infrastructure without written permission is illegal in most jurisdictions. You
 are responsible for how you use it.
+
+## License
+
+[MIT](LICENSE) © 2026 REFFIX-X
