@@ -32,10 +32,13 @@ class ZoneTransfer:
     names: list[str] = field(default_factory=list)
     records: int = 0
     error: str | None = None
+    #: True when the transfer was cut short by the deadline or the record cap —
+    #: the names are only a partial snapshot, so it must not read as "complete".
+    truncated: bool = False
 
     @property
     def ok(self) -> bool:
-        return bool(self.names) and self.error is None
+        return bool(self.names) and self.error is None and not self.truncated
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +46,7 @@ class ZoneTransfer:
             "names": sorted(set(self.names)),
             "records": self.records,
             "allowed": self.ok,
+            "truncated": self.truncated,
             "error": self.error,
         }
 
@@ -78,6 +82,7 @@ async def _axfr_one(
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
+                out.truncated = True
                 break
             try:
                 body = await _read_message(reader, remaining)
@@ -100,7 +105,10 @@ async def _axfr_one(
                 if name:
                     names.append(name)
             # The transfer ends when the opening SOA repeats.
-            if soa_seen >= 2 or total >= MAX_RECORDS:
+            if soa_seen >= 2:
+                break
+            if total >= MAX_RECORDS:
+                out.truncated = True
                 break
         out.records = total
         out.names = names
@@ -159,27 +167,38 @@ async def attempt_zone_transfer(
     for ip in addresses[:max_servers]:
         outcome = await _axfr_one(ip, domain, timeout=timeout, port=port)
         results.append(outcome)
-        if bus is not None:
+
+    if not results:
+        return results
+
+    # Keep only in-scope names from a successful transfer, then report — so the
+    # logged count matches what the caller actually receives, and a transfer that
+    # turns out to hold only out-of-scope names is not announced as "allowed".
+    for outcome in results:
+        if outcome.ok:
+            outcome.names = [
+                name for name in outcome.names if is_valid_hostname(name, domain)
+            ]
+    if bus is not None:
+        for outcome in results:
             try:
                 if outcome.ok:
                     bus.emit(
-                        f"AXFR — {ip} allowed a zone transfer of {domain} "
-                        f"({len(set(outcome.names))} name(s))",
+                        f"AXFR — {outcome.server} allowed a zone transfer of "
+                        f"{domain} ({len(set(outcome.names))} name(s))",
+                        "warn",
+                        "osint",
+                        host=domain,
+                    )
+                elif outcome.truncated:
+                    bus.emit(
+                        f"AXFR — {outcome.server} transfer of {domain} was "
+                        f"truncated ({outcome.records} records read before the "
+                        f"cap/deadline)",
                         "warn",
                         "osint",
                         host=domain,
                     )
             except Exception:  # pragma: no cover
                 pass
-
-    if not results:
-        return results
-
-    # Keep only in-scope names from a successful transfer, so the caller gets a
-    # clean candidate list rather than raw zone data.
-    for outcome in results:
-        if outcome.ok:
-            outcome.names = [
-                name for name in outcome.names if is_valid_hostname(name, domain)
-            ]
     return results

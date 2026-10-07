@@ -592,6 +592,10 @@ class ScanEngine:
             await self._probe.close()
             self._resolver.stop_health_loop()
             await self._resolver.flush_disk_cache()
+            # Close the multiplexed UDP pool and the disk-cache SQLite connection,
+            # so a long-lived runner (TUI / Streamlit) does not leak sockets and
+            # connections across scans.
+            self._resolver.close()
         elapsed = time.perf_counter() - started
         bus.emit(
             f"Scan finished in {elapsed:.1f}s", "success", "done",
@@ -1848,12 +1852,25 @@ class ScanEngine:
                 )
                 total = len(self.result.resolutions)
                 if total % self._progress_interval == 0:
-                    bus.emit(
+                    self.bus.emit(
                         f"{total} host(s) resolved — {self.bus.stats.dns_failed} "
                         f"negative answer(s) so far",
                         "debug",
                         "stat",
                     )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # An unexpected error in the resolve path must not silently drop
+                # a host: ``query_raw`` catches its own DNS failures, so anything
+                # that reaches here is a real bug or a malformed label.  Record it
+                # and keep the worker alive.
+                self.bus.bump("errors")
+                self.bus.warn(
+                    f"Resolve failed for ://{host} — {exc.__class__.__name__}: {exc}",
+                    host=host,
+                )
+                self.result.filtered[host] = f"resolve error ({exc.__class__.__name__})"
             finally:
                 queue.task_done()
 
@@ -2118,25 +2135,52 @@ class ScanEngine:
                 "info",
                 "port",
             )
-        targets = [
-            (item.name, item.ip)
-            for item in batch
-            if item.ip and item.name not in skipped
-        ]
+        # One target per address (the primary IPv4 plus any IPv6) so a
+        # dual-stack host's AAAA-only interface is scanned too, not just the
+        # IPv4 address.  ``sweep_hosts`` keys results by host, so the results are
+        # split back out by the address that actually answered below.
+        targets: list[tuple[str, str]] = []
+        for item in batch:
+            if not item.ip or item.name in skipped:
+                continue
+            targets.append((item.name, item.ip))
+            if self.config.ipv6:
+                for addr in item.addresses:
+                    if ":" in addr and addr != item.ip:
+                        targets.append((item.name, addr))
         if not targets:
             return
         bus.bump_clamped("active_tasks", 1)
         try:
             swept = await self._scanner.sweep_hosts(targets, ports)
+            # ``sweep_hosts`` returns one list per *host*, merging every address's
+            # answers; re-group by (host, address) using each PortResult's own ip
+            # so IPv4 and IPv6 are probed separately.
+            ports_by_address: dict[tuple[str, str], list[PortResult]] = {}
+            for host, addr in targets:
+                ports_by_address[(host, addr)] = [
+                    p for p in swept.get(host, []) if p.ip == addr
+                ]
+            open_by_host: dict[str, dict[int, PortResult]] = {}
+            for (host, _addr), port_results in ports_by_address.items():
+                bucket = open_by_host.setdefault(host, {})
+                for p in port_results:
+                    bucket.setdefault(p.port, p)
+
             host_probes: list[tuple[str, str, list[int]]] = []
             label_by_host: dict[str, dict[int, str]] = {}
             ip_by_host: dict[str, str] = {}
             provider_name_by_host: dict[str, str | None] = {}
+
+            seen_hosts: set[str] = set()
             for host, ip in targets:
                 if self._stop.is_set():
                     return
+                if host in seen_hosts:
+                    continue
+                seen_hosts.add(host)
                 provider = provider_by_host.get(host)
-                open_ports = swept.get(host, [])
+                open_ports = list(open_by_host.get(host, {}).values())
                 if not open_ports:
                     self.bus.bump("filtered_no_web")
                     self.bus.filtered(
@@ -2164,9 +2208,16 @@ class ScanEngine:
                 label_by_host[host] = {p.port: p.label for p in open_ports}
                 ip_by_host[host] = ip
                 provider_name_by_host[host] = provider.name if provider else None
-                host_probes.append((host, ip, [p.port for p in open_ports]))
+                # HTTP-verify each address that answered, so an IPv6-only
+                # interface is probed over IPv6 rather than the primary IPv4.
+                for (h, addr), port_results in sorted(ports_by_address.items()):
+                    if h != host or not port_results:
+                        continue
+                    host_probes.append(
+                        (host, addr, sorted(p.port for p in port_results))
+                    )
 
-            # Fan out HTTP verification across every host of the batch at once,
+            # Fan out HTTP verification across every (host, address) at once,
             # instead of awaiting each host's probes in turn.  The prober's own
             # semaphore still bounds the in-flight requests.
             async def probe_host(host: str, ip: str, ports: list[int]):
@@ -2176,21 +2227,29 @@ class ScanEngine:
                 *(probe_host(host, ip, ports) for host, ip, ports in host_probes),
                 return_exceptions=True,
             )
-            for entry in gathered:
+            for (host, ip, _ports), entry in zip(host_probes, gathered):
                 if self._stop.is_set():
                     return
                 if isinstance(entry, BaseException):
+                    # A probe error must not silently drop a live interface.
+                    self.bus.bump("errors")
+                    self.bus.error(
+                        f"Web probe failed for ://{host} ({ip}) — "
+                        f"{entry.__class__.__name__}: {entry}",
+                        host=host,
+                        ip=ip,
+                    )
+                    self.result.filtered[host] = f"probe error ({entry.__class__.__name__})"
                     continue
-                host, probes = entry
-                ip = ip_by_host[host]
-                label_map = label_by_host.get(host, {})
-                provider_name = provider_name_by_host.get(host)
+                _host, probes = entry
+                label_map = label_by_host.get(_host, {})
+                provider_name = provider_name_by_host.get(_host)
                 interfaces = [p for p in probes if p.ok]
                 if not interfaces:
                     # Only bounces answered: record them, promote later if the
                     # host turns out to have no real interface anywhere.
                     self.bus.bump("filtered_no_web")
-                    self.result.filtered[host] = "redirect only"
+                    self.result.filtered[_host] = "redirect only"
                 for probe in probes:
                     await self._handle_probe(
                         probe, ip, label_map, provider_name=provider_name

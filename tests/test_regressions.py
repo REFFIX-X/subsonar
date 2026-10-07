@@ -560,3 +560,159 @@ async def test_mining_connector_uses_anonymous_resolver() -> None:
         assert isinstance(resolver_of(connector), AnonymousAiohttpResolver)
     finally:
         await connector.close()
+
+
+# --------------------------------------------------------------------------- #
+# Resolve worker: an unexpected error must not silently drop a host
+# --------------------------------------------------------------------------- #
+
+
+async def test_resolve_worker_records_unexpected_error_and_survives() -> None:
+    from subsonar.core.config import ScanConfig
+    from subsonar.core.engine import ScanEngine
+
+    engine = ScanEngine(ScanConfig(domain="example.com"), profile=3, bus=EventBus())
+    engine.config.ipv6 = False
+    engine.config.confirm_resolvers = 0
+
+    class BoomResolver:
+        async def resolve(self, host: str, **kwargs: Any) -> DNSResult:
+            if host == "bad.example.com":
+                raise RuntimeError("boom")
+            result = DNSResult(name=host)
+            result.addresses = ["203.0.113.1"]
+            return result
+
+    engine._resolver = BoomResolver()  # type: ignore[assignment]
+
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    queue.put_nowait("bad.example.com")
+    queue.put_nowait("good.example.com")
+    await engine._resolve_worker(queue, 0)
+
+    assert engine.result.filtered["bad.example.com"] == "resolve error (RuntimeError)"
+    # The worker must keep going and still resolve the next host.
+    assert "good.example.com" in engine.result.resolutions
+
+
+# --------------------------------------------------------------------------- #
+# AXFR truncation must not read as a complete (allowed) transfer
+# --------------------------------------------------------------------------- #
+
+
+def test_zone_transfer_truncated_is_not_ok() -> None:
+    from subsonar.core.axfr import ZoneTransfer
+
+    complete = ZoneTransfer(server="1.2.3.4", names=["a.example.com"], records=10)
+    assert complete.ok is True
+    assert complete.to_dict()["allowed"] is True
+    assert complete.to_dict()["truncated"] is False
+
+    truncated = ZoneTransfer(
+        server="1.2.3.4", names=["a.example.com"], records=10, truncated=True
+    )
+    assert truncated.ok is False
+    assert truncated.to_dict()["allowed"] is False
+    assert truncated.to_dict()["truncated"] is True
+
+
+async def test_axfr_truncated_transfer_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subsonar.core.axfr as axfr
+    from subsonar.core.axfr import _axfr_one
+    from subsonar.core.dns import encode_name
+
+    monkeypatch.setattr(axfr, "MAX_RECORDS", 1)
+
+    zone = "example.com"
+
+    def rr(name: str, rtype: int, rdata: bytes) -> bytes:
+        return encode_name(name) + struct.pack("!HHIH", rtype, 1, 60, len(rdata)) + rdata
+
+    def response(qid: int) -> bytes:
+        soa = (
+            encode_name("ns1." + zone)
+            + encode_name("hostmaster." + zone)
+            + struct.pack("!IIIII", 1, 2, 3, 4, 5)
+        )
+        question = encode_name(zone) + struct.pack("!HH", 252, 1)
+        answers = rr(zone, TYPE_SOA, soa) + rr("a." + zone, 1, socket.inet_aton("203.0.113.5"))
+        header = struct.pack("!HHHHHH", qid, 0x8400, 1, 2, 0, 0)
+        return header + question + answers
+
+    async def handler(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        length = struct.unpack("!H", await reader.readexactly(2))[0]
+        packet = await reader.readexactly(length)
+        qid = struct.unpack("!H", packet[:2])[0]
+        body = response(qid)
+        writer.write(struct.pack("!H", len(body)) + body)
+        await writer.drain()
+        try:
+            await reader.readexactly(2)  # block until the client closes
+        except Exception:
+            pass
+        writer.close()
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        transfer = await _axfr_one("127.0.0.1", "example.com", timeout=3, port=port)
+    assert transfer.truncated is True
+    assert transfer.ok is False
+
+
+# --------------------------------------------------------------------------- #
+# IPv6: a dual-stack host's AAAA addresses are actually swept + probed
+# --------------------------------------------------------------------------- #
+
+
+async def test_ipv6_addresses_are_swept() -> None:
+    from subsonar.core.config import ScanConfig
+    from subsonar.core.engine import ScanEngine
+    from subsonar.core.scanner import PortResult
+    from subsonar.core.web_probe import WebProbeResult
+
+    engine = ScanEngine(ScanConfig(domain="example.com"), profile=3, bus=EventBus())
+    engine.config.ipv6 = True
+    engine.config.skip_provider_hosts = False
+    engine.config.fingerprint_findings = False
+
+    swept_targets: list[tuple[str, str]] = []
+    probed: list[tuple[str, str, list[int]]] = []
+
+    class FakeScanner:
+        async def sweep_hosts(self, hosts: Any, ports: Any) -> dict[str, list[PortResult]]:
+            swept_targets.extend(hosts)
+            out: dict[str, list[PortResult]] = {}
+            for host, ip in hosts:
+                out.setdefault(host, []).append(
+                    PortResult(host=host, ip=ip, port=443, label="HTTPS", open=True)
+                )
+            return out
+
+    class FakeProbe:
+        async def probe_multi(
+            self, host: str, ip: str, ports: list[int]
+        ) -> list[WebProbeResult]:
+            probed.append((host, ip, list(ports)))
+            return [
+                WebProbeResult(
+                    host=host, ip=ip, port=p, scheme="https",
+                    url=f"https://{host}", status=200, ok=True, kind="interface",
+                )
+                for p in ports
+            ]
+
+    engine._scanner = FakeScanner()  # type: ignore[assignment]
+    engine._probe = FakeProbe()  # type: ignore[assignment]
+
+    result = DNSResult(name="dual.example.com")
+    result.addresses = ["203.0.113.1", "2001:db8::1"]
+
+    await engine._sweep_batch([result], [443])
+
+    swept = {ip for _host, ip in swept_targets}
+    assert swept == {"203.0.113.1", "2001:db8::1"}, swept
+    probed_ips = {ip for _host, ip, _ports in probed}
+    assert probed_ips == {"203.0.113.1", "2001:db8::1"}, probed_ips

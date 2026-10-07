@@ -70,6 +70,11 @@ class UrlScanSource(DiscoverySource):
                     raise RuntimeError(f"urlscan.io returned HTTP {status}")
                 break
             hosts, cursor = parse_page(text)
+            if cursor is None and not hosts and text.strip():
+                try:
+                    json.loads(text)
+                except Exception:
+                    self._warn_unparseable(domain)
             for host in hosts:
                 yield host
             if not cursor:

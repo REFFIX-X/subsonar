@@ -76,6 +76,10 @@ class RapidDNSSource(DiscoverySource):
                 continue
             rows = parse_table(text)
             if not rows:
+                if text.strip():
+                    self._warn_unparseable(
+                        domain, detail=f"endpoint {url} returned no rows"
+                    )
                 continue
             for host, ip in rows:
                 yield host, ip

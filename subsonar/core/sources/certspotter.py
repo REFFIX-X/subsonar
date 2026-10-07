@@ -73,7 +73,11 @@ class CertSpotterSource(DiscoverySource):
                     raise RuntimeError(f"CertSpotter returned HTTP {status}")
                 break
             payload = _loads(text)
-            if not isinstance(payload, list) or not payload:
+            if not isinstance(payload, list):
+                if after is None and text.strip():
+                    self._warn_unparseable(domain)
+                break
+            if not payload:
                 break
             for host in _names_from(payload):
                 yield host

@@ -48,7 +48,13 @@ class ThreatMinerSource(DiscoverySource):
         status, text = await self.get_text(self.ENDPOINT.format(domain=domain))
         if status != 200:
             raise RuntimeError(f"ThreatMiner returned HTTP {status}")
-        for host in parse_results(text):
+        hosts = parse_results(text)
+        if not hosts and text.strip():
+            try:
+                json.loads(text)
+            except Exception:
+                self._warn_unparseable(domain)
+        for host in hosts:
             yield host
 
 

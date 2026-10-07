@@ -202,6 +202,22 @@ class DiscoverySource:
             except Exception:
                 return status, None
 
+    def _warn_unparseable(self, domain: str, *, detail: str = "") -> None:
+        """Surface a 200-with-unparseable-body so a broken source is visible.
+
+        Every source converts a non-JSON/non-HTML body into an empty result, which
+        is indistinguishable from "this domain genuinely has no records".  Call
+        this when a non-empty body yielded nothing parseable, so a Cloudflare
+        challenge, rate-limit page or API shape change shows up as a warning
+        instead of silence.
+        """
+        suffix = f" ({detail})" if detail else ""
+        self.bus.warn(
+            f"{self.name} returned a non-empty but unparseable body for "
+            f"{domain}{suffix} — possible error page or API change",
+            source=self.name,
+        )
+
     # -- plugin hook -------------------------------------------------------- #
     async def fetch_hosts(self, domain: str) -> AsyncIterator[Any]:
         """Yield raw hostnames (or ``(host, ip)`` pairs) for *domain*.

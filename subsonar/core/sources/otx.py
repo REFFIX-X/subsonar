@@ -68,6 +68,11 @@ class OTXSource(DiscoverySource):
                     raise RuntimeError(f"OTX returned HTTP {status}")
                 break
             pairs, has_next = parse_page(text)
+            if page == 1 and not pairs and text.strip():
+                try:
+                    json.loads(text)
+                except Exception:
+                    self._warn_unparseable(domain)
             for host, address in pairs:
                 yield host, address
             if not has_next or not pairs:
