@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import json
 import os
 import sys
@@ -40,6 +41,7 @@ from subsonar.core.config import (
     FORBIDDEN_DNS_SERVERS,
     ScanConfig,
 )
+from subsonar.core.dns import ResolverPoolUnreachable
 from subsonar.core.events import BUS
 from subsonar.core.profiles import PROFILE_BY_ID, render_profile_table
 from subsonar.core.theme import Palette, banner_lines
@@ -1045,12 +1047,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ninterrupted — partial results were written if a scan completed")
         return EXIT_INTERRUPTED
+    except ResolverPoolUnreachable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    except OSError as exc:
+        if not _is_write_error(exc):
+            raise
+        print(f"error: cannot write scan files: {exc}", file=sys.stderr)
+        print(
+            "hint: pick a writable directory with --output, or set "
+            "SUBSONAR_OUTPUT and SUBSONAR_CACHE.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
     except KeyError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
+
+
+def _is_write_error(exc: OSError) -> bool:
+    """True when *exc* is a user-facing failure to create reports or cache files."""
+    if isinstance(exc, PermissionError):
+        return True
+    return exc.errno in {
+        errno.EACCES,
+        errno.EPERM,
+        errno.EROFS,
+        errno.ENOSPC,
+        errno.EEXIST,
+        errno.ENOTDIR,
+    }
 
 
 def _privacy_banner() -> str:

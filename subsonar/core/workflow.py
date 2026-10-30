@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .config import CACHE_DIR, PORT_MATRIX, OUTPUT_DIR, ScanConfig
+from .dns import ResolverPoolUnreachable
 from .ports import describe, parse_port_spec
 from .profiles import PROFILE_BY_KEY, get_profile
 
@@ -653,6 +654,10 @@ async def run_multi(
         config = settings.build_config(domain, profile=profile)
         try:
             result = await runner(config, profile)
+        except ResolverPoolUnreachable:
+            # The pool is down for every target. Retrying the rest of the
+            # batch would only repeat the same pre-flight failure.
+            raise
         except Exception as exc:  # noqa: BLE001 - one bad target must not stop the batch
             if bus is not None:
                 bus.error(

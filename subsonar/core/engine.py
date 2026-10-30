@@ -27,7 +27,7 @@ from typing import Any, Callable, Sequence
 
 from .config import ScanConfig
 from .discovery import expand_discovery
-from .dns import AnonymousResolver, DNSResult, WildcardReport
+from .dns import AnonymousResolver, DNSResult, ResolverPoolUnreachable, WildcardReport
 from .events import BUS, EventBus
 from .osint import OSINTCollector, SourceReport, is_valid_hostname
 from .ports import describe
@@ -585,6 +585,11 @@ class ScanEngine:
             bus.warn("Scan cancelled")
             self.result.notes.append("scan cancelled")
             raise
+        except ResolverPoolUnreachable:
+            # Not a per-host failure. Continuing would retry every candidate
+            # against resolvers that already failed the pre-flight.
+            self.result.notes.append("resolver pool unreachable")
+            raise
         except Exception as exc:  # pragma: no cover - defensive top-level
             bus.error(f"Engine failure: {exc.__class__.__name__}: {exc}")
             self.result.notes.append(f"engine failure: {exc}")
@@ -622,21 +627,25 @@ class ScanEngine:
             health = await self._resolver.health_check(
                 timeout=min(2.5, max(1.0, self.config.dns_timeout)), log=True
             )
-            live = [node for node, error in health.items() if error is None]
-            self.result.notes.append(
-                f"resolver health: {len(live)}/{len(health)} nodes answering"
-            )
-            if not live:
-                bus.warn(
-                    "No anonymous resolver answered the pre-flight check — "
-                    "falling back to the full pool with extended retries"
-                )
-            await self._resolver.start_health_loop(interval=600.0)
+        except ResolverPoolUnreachable:
+            raise
         except Exception as exc:
-            bus.warn(
-                f"Resolver pre-flight failed ({exc.__class__.__name__}: {exc}) — "
-                f"continuing with the full pool"
+            raise ResolverPoolUnreachable(
+                "resolver pre-flight failed "
+                f"({exc.__class__.__name__}: {exc}). This scan stops instead of "
+                "retrying every name against a pool that could not be checked."
+            ) from exc
+        live = [node for node, error in health.items() if error is None]
+        self.result.notes.append(
+            f"resolver health: {len(live)}/{len(health)} nodes answering"
+        )
+        if not live:
+            raise ResolverPoolUnreachable(
+                "no anonymous DNS resolver answered UDP/53 "
+                f"({len(live)}/{len(health)}). Outbound DNS to the privacy pool "
+                "looks blocked, so this scan stops instead of retrying every name."
             )
+        await self._resolver.start_health_loop(interval=600.0)
 
     # -- offline enrichment / free OSINT ----------------------------------- #
     async def _phase_geo(self) -> None:

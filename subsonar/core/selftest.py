@@ -572,9 +572,15 @@ async def run_selftest(
             [f"m{i}.{TEST_DOMAIN}" for i in range(12)], log=False
         )
         sockets = mux_resolver._pool.created
+        # The pool opens another socket only while every existing one is busy,
+        # and it never exceeds max_per_server. Python 3.13 overlaps the
+        # disk-cache awaits enough to use a few sockets; one socket per query
+        # would mean multiplexing was not happening.
         record(
             "dns udp multiplexing",
-            all(r.ok for r in mux_results) and sockets <= 2,
+            all(r.ok for r in mux_results)
+            and 1 <= sockets <= mux_resolver._pool.max_per_server
+            and sockets < len(mux_results),
             f"{len(mux_results)} queries over {sockets} socket(s) "
             f"({mux_resolver.transport_stats()['queries']} sent)",
         )

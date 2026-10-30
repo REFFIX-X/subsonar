@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # Install subsonar from this checkout and put the `subsonar` command on PATH.
-# Uses pipx when it is available. Otherwise installs into the current Python.
+#
+# Uses pipx when it is available (isolated environment). Otherwise installs
+# into .venv in this checkout. A second run upgrades that same install.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the checkout even when `dirname` is not on PATH.
+_src="${BASH_SOURCE[0]}"
+_dir="${_src%/*}"
+if [[ "$_dir" == "$_src" ]]; then
+  _dir="."
+fi
+ROOT="$(cd "$_dir" && pwd)"
 cd "$ROOT"
 
 if command -v pipx >/dev/null 2>&1; then
@@ -12,6 +20,13 @@ if command -v pipx >/dev/null 2>&1; then
 fi
 
 PYTHON="${PYTHON:-python3}"
-echo "pipx was not found; installing into ${PYTHON}."
-echo "pipx keeps the tool in its own environment: https://pipx.pypa.io"
-exec "$PYTHON" -m pip install "$ROOT"
+VENV="${SUBSONAR_VENV:-$ROOT/.venv}"
+if [[ ! -x "$VENV/bin/python" ]]; then
+  echo "Creating ${VENV} with ${PYTHON}"
+  "$PYTHON" -m venv "$VENV"
+fi
+"$VENV/bin/python" -m pip install --upgrade pip
+"$VENV/bin/python" -m pip install "$ROOT"
+echo ""
+echo "Installed into ${VENV}"
+echo "Run: ${VENV}/bin/subsonar --help"

@@ -37,6 +37,16 @@ from .dnscache import CacheEntry, DNSCache
 from .events import BUS, EventBus
 from .ratelimit import RateLimiter
 
+
+class ResolverPoolUnreachable(RuntimeError):
+    """No resolver in the privacy pool answered the pre-flight probe.
+
+    Raised so a scan stops instead of retrying every candidate against a pool
+    that is not answering UDP/53 (a firewall, a dropped route, or a network
+    that blocks outbound DNS).
+    """
+
+
 #: Name used to prove a resolver still answers recursive queries.
 HEALTHCHECK_NAME = "example.com"
 

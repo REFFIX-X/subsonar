@@ -67,20 +67,21 @@ pipx install --force "git+https://github.com/REFFIX-X/subsonar"
 
 ### pip
 
-```bash
-python3 -m pip install "git+https://github.com/REFFIX-X/subsonar"
-subsonar --help
-```
-
-Use a virtual environment if you do not want the package in the Python you use for everything else:
+Install into a virtual environment. Debian, Ubuntu, and other externally managed Pythons refuse `pip install` into the system interpreter.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate          # Windows PowerShell: .venv\Scripts\Activate.ps1
 python -m pip install "git+https://github.com/REFFIX-X/subsonar"
+subsonar --help
 ```
 
-From a directory that already contains this repository, `python -m pip install .` does the same thing with the local files.
+From a directory that already contains this repository, with the same virtual environment activated:
+
+```bash
+python -m pip install .
+python -m pip install -e ".[dev]"  # editable checkout, plus pytest
+```
 
 ### From a clone
 
@@ -95,11 +96,13 @@ subsonar --help
 
 `python main.py ...` from the checkout runs the same program. `python -m subsonar ...` works once the package is installed.
 
-A helper in the clone installs with pipx when pipx is on PATH, and otherwise uses pip:
+A helper in the clone installs with pipx when pipx is on PATH. Otherwise it creates `.venv` in the checkout and installs there (so it still works when the system Python rejects pip). Running it again upgrades that same install.
 
 ```bash
 ./install.sh
 ```
+
+Without pipx, the command is `.venv/bin/subsonar` until you activate `.venv`.
 
 On Windows, this creates `.venv`, installs the checkout, and opens the dashboard:
 
@@ -122,7 +125,17 @@ The image includes the CLI, the TUI, and the web dashboard, so the build is larg
 ```bash
 docker build -t subsonar .
 docker run --rm subsonar --help
+docker run --rm subsonar --version
+docker run --rm subsonar selftest
+mkdir -p output
 docker run --rm -v "$PWD/output:/data/output" subsonar scan example.com -p 1 --no-geo-download
+```
+
+The image starts as root only to make `/data` writable, then runs the scanner as the user `subsonar` (uid 1000). Reports in the mounted `output` directory are owned by that user. Mount the whole data directory if you also want the cache kept:
+
+```bash
+mkdir -p subsonar-data
+docker run --rm -v "$PWD/subsonar-data:/data" subsonar scan example.com -p 1 --no-geo-download
 ```
 
 Dashboard, then open <http://localhost:8501>:
@@ -148,7 +161,7 @@ subsonar scan example.com -p 1 --no-geo --no-geo-download
 
 `example.com` is reserved for documentation. Scan domains you are allowed to test. A finished scan with no confirmed web interface exits **2**. That is a completed run, not a crash.
 
-A real scan needs outbound UDP port 53 to the resolver pool. If a firewall blocks that, the pre-flight line says `0/18 anonymous nodes answering` and name resolution stalls on timeouts. OSINT uses HTTPS and can still return names in that situation.
+A real scan needs outbound UDP port 53 to the resolver pool. If none of those resolvers answer, the scan stops with exit code 1 and a short error. It does not keep retrying every name.
 
 A few more useful invocations:
 

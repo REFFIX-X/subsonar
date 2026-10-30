@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install the checkout and test dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run the test suite
+        run: python -m pytest
+
+      - name: Build the sdist and wheel and confirm the wordlist is inside both
+        run: |
+          python -m pip install build
+          python -m build --outdir "$RUNNER_TEMP/dist"
+          python - <<'PY'
+          import tarfile
+          import zipfile
+          from pathlib import Path
+          import os
+
+          dist = Path(os.environ["RUNNER_TEMP"]) / "dist"
+          wheel = next(dist.glob("*.whl"))
+          sdist = next(dist.glob("*.tar.gz"))
+          needle = "ai-super-subdomains.txt"
+          with zipfile.ZipFile(wheel) as archive:
+              wheel_names = archive.namelist()
+          with tarfile.open(sdist) as archive:
+              sdist_names = archive.getnames()
+          assert any(name.endswith(needle) for name in wheel_names), wheel_names
+          assert any(name.endswith(needle) for name in sdist_names), sdist_names
+          print(f"wordlist present in {wheel.name} and {sdist.name}")
+          PY
+
+      - name: Install the wheel and run the offline self-test
+        run: |
+          python -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/smoke/bin/python" -m pip install "$RUNNER_TEMP/dist"/*.whl
+          "$RUNNER_TEMP/smoke/bin/python" -m pip check
+          "$RUNNER_TEMP/smoke/bin/subsonar" --version
+          "$RUNNER_TEMP/smoke/bin/subsonar" selftest
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t subsonar .
+
+      - name: Help, version, and offline self-test
+        run: |
+          docker run --rm subsonar --help
+          docker run --rm subsonar --version
+          docker run --rm subsonar selftest
+
+      - name: A mounted /data volume is writable by the non-root user
+        run: |
+          mkdir -p "$RUNNER_TEMP/data"
+          docker run --rm -v "$RUNNER_TEMP/data:/data" subsonar init
+          test -f "$RUNNER_TEMP/data/subsonar.toml"
+          # The scanner runs as uid 1000, so the file it writes is not root-owned.
+          owner="$(stat -c '%u' "$RUNNER_TEMP/data/subsonar.toml")"
+          test "$owner" = "1000"
