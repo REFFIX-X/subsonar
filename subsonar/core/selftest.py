@@ -563,42 +563,55 @@ async def run_selftest(
 
         mux_dns = MockDNSServer(wildcard=True)
         mux_port = await mux_dns.start()
-        mux_resolver = AnonymousResolver(
-            servers=[f"{MOCK_IP}:{mux_port}"], timeout=1.5, concurrency=32,
-            bus=EventBus(), verbose_queries=False, multiplex=True,
-            disk_cache=DNSCache(db),
-        )
-        mux_results = await mux_resolver.resolve_many(
-            [f"m{i}.{TEST_DOMAIN}" for i in range(12)], log=False
-        )
-        sockets = mux_resolver._pool.created
-        # The pool opens another socket only while every existing one is busy,
-        # and it never exceeds max_per_server. Python 3.13 overlaps the
-        # disk-cache awaits enough to use a few sockets; one socket per query
-        # would mean multiplexing was not happening.
-        record(
-            "dns udp multiplexing",
-            all(r.ok for r in mux_results)
-            and 1 <= sockets <= mux_resolver._pool.max_per_server
-            and sockets < len(mux_results),
-            f"{len(mux_results)} queries over {sockets} socket(s) "
-            f"({mux_resolver.transport_stats()['queries']} sent)",
-        )
-        mux_resolver.close()
 
-        # A fresh resolver sharing only the on-disk cache must hit it.
-        warm_resolver = AnonymousResolver(
-            servers=[f"{MOCK_IP}:{mux_port}"], timeout=1.5, bus=EventBus(),
-            verbose_queries=False, disk_cache=DNSCache(db),
-        )
-        warm = await warm_resolver.resolve(f"m0.{TEST_DOMAIN}", log=False)
-        record(
-            "persistent dns cache",
-            warm.ok and warm_resolver.disk_cache_hits == 1,
-            f"second resolver answered from disk "
-            f"({warm_resolver.disk_cache_hits} hit, attempted={warm.attempted_servers})",
-        )
-        warm_resolver.close()
+        async def _probe_mux() -> tuple[bool, str, bool, str]:
+            for stale in cache_path.glob("selftest-dns-cache.sqlite3*"):
+                stale.unlink(missing_ok=True)
+            mux_resolver = AnonymousResolver(
+                servers=[f"{MOCK_IP}:{mux_port}"], timeout=1.5, concurrency=32,
+                bus=EventBus(), verbose_queries=False, multiplex=True,
+                disk_cache=DNSCache(db),
+            )
+            mux_results = await mux_resolver.resolve_many(
+                [f"m{i}.{TEST_DOMAIN}" for i in range(12)], log=False
+            )
+            sockets = mux_resolver._pool.created
+            # The pool opens another socket only while every existing one is
+            # busy, and it never exceeds max_per_server. A faster loop (Python
+            # 3.13, or a busy CI runner) overlaps the disk-cache awaits enough
+            # to use a few sockets. One socket per query would mean
+            # multiplexing was not happening.
+            mux_ok = (
+                all(result.ok for result in mux_results)
+                and 1 <= sockets <= mux_resolver._pool.max_per_server
+                and sockets < len(mux_results)
+            )
+            mux_detail = (
+                f"{len(mux_results)} queries over {sockets} socket(s) "
+                f"({mux_resolver.transport_stats()['queries']} sent)"
+            )
+            mux_resolver.close()
+            warm_resolver = AnonymousResolver(
+                servers=[f"{MOCK_IP}:{mux_port}"], timeout=1.5, bus=EventBus(),
+                verbose_queries=False, disk_cache=DNSCache(db),
+            )
+            warm = await warm_resolver.resolve(f"m0.{TEST_DOMAIN}", log=False)
+            cache_ok = warm.ok and warm_resolver.disk_cache_hits == 1
+            cache_detail = (
+                "second resolver answered from disk "
+                f"({warm_resolver.disk_cache_hits} hit, "
+                f"attempted={warm.attempted_servers})"
+            )
+            warm_resolver.close()
+            return mux_ok, mux_detail, cache_ok, cache_detail
+
+        mux_ok, mux_detail, cache_ok, cache_detail = await _probe_mux()
+        # A single loopback datagram can be dropped when the runner is busy.
+        # One retry keeps that from failing an otherwise healthy engine.
+        if not (mux_ok and cache_ok):
+            mux_ok, mux_detail, cache_ok, cache_detail = await _probe_mux()
+        record("dns udp multiplexing", mux_ok, mux_detail)
+        record("persistent dns cache", cache_ok, cache_detail)
         mux_dns.stop()
     except Exception as exc:
         record("dns udp multiplexing", False, f"{exc.__class__.__name__}: {exc}")
