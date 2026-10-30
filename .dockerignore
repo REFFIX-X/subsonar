@@ -1,0 +1,12 @@
+.git
+.venv
+venv
+.subsonar_cache
+output
+.tmp
+**/__pycache__
+.pytest_cache
+*.egg-info
+tests
+tools
+.claude

@@ -16,7 +16,27 @@ from pathlib import Path
 # --------------------------------------------------------------------------- #
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = PACKAGE_ROOT.parent
+
+
+def _source_checkout_root(package_root: Path) -> Path | None:
+    """Repo root when this file is the checkout, else ``None``.
+
+    A source checkout (and an editable install of one) has ``main.py`` and
+    ``pyproject.toml`` beside the ``subsonar`` package. An ordinary install
+    lives under ``site-packages``, which must not become the cache or the
+    report directory.
+    """
+    parent = package_root.parent
+    if (parent / "main.py").is_file() and (parent / "pyproject.toml").is_file():
+        return parent
+    return None
+
+
+_SOURCE_ROOT = _source_checkout_root(PACKAGE_ROOT)
+# Checkouts keep writing next to the repository, which is what ``python main.py``
+# has always done. Installed copies use the working directory, so
+# ``subsonar scan`` drops ``./output`` where you ran it.
+PROJECT_ROOT = _SOURCE_ROOT if _SOURCE_ROOT is not None else Path.cwd()
 CACHE_DIR = Path(os.environ.get("SUBSONAR_CACHE", PROJECT_ROOT / ".subsonar_cache"))
 OUTPUT_DIR = Path(os.environ.get("SUBSONAR_OUTPUT", PROJECT_ROOT / "output"))
 

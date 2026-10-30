@@ -1,7 +1,12 @@
-# subsonar — runtime requirements
+# Historical dependency list. The supported install is the package itself:
 #
-#   python -m venv .venv
-#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+#   pipx install "git+https://github.com/REFFIX-X/subsonar"
+#   pip install .
+#
+# `pip install -r requirements.txt` still installs the same runtime libraries
+# plus pytest, which is what a bare source checkout needs before `python main.py`.
+# It does not install the `subsonar` console script — use `pip install -e .`
+# (or `pip install -e ".[dev]"` to include pytest) for that.
 
 # --- core async engine -------------------------------------------------------
 aiohttp>=3.9,<4          # async HTTP/HTTPS verification + OSINT + wordlist streaming
