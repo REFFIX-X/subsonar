@@ -3,9 +3,10 @@
     Bootstrap subsonar on Windows and launch the web dashboard.
 
 .DESCRIPTION
-    Finds Python 3.11+, creates a local .venv (if missing), installs
-    requirements.txt, then starts `python main.py web` and opens the Streamlit
-    dashboard in your browser at http://localhost:8501.
+    Finds Python 3.11+, creates a local .venv (if missing), installs this
+    checkout with pip (`pip install -e .`, which also creates the `subsonar`
+    command inside the venv), then starts `python main.py web` and opens the
+    Streamlit dashboard in your browser at http://localhost:8501.
 
     Run it from anywhere; it always resolves the repo root from its own path.
 
@@ -106,11 +107,11 @@ def _prefer_ipv4(*args, **kwargs):
 socket.getaddrinfo = _prefer_ipv4
 '@ | Set-Content -Path (Join-Path $sitePackages "sitecustomize.py") -Encoding UTF8
 
-    Write-Step "Installing dependencies (this can take a few minutes) ..."
+    Write-Step "Installing subsonar (this can take a few minutes) ..."
     & $venvPy -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed" }
-    & $venvPy -m pip install -r requirements.txt
-    if ($LASTEXITCODE -ne 0) { throw "pip install -r requirements.txt failed" }
+    & $venvPy -m pip install -e .
+    if ($LASTEXITCODE -ne 0) { throw "pip install -e . failed" }
 }
 
 Write-Host ""
